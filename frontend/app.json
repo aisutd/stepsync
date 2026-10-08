@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "StepSync",
+    "slug": "stepsync",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "stepsync",
+    "userInterfaceStyle": "dark",
+    "plugins": [
+      "expo-router",
+      "expo-video",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "StepSync needs access to your videos to analyze your dancing."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
