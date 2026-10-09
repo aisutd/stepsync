@@ -20,6 +20,8 @@ export type StepFeedback = {
 };
 
 export type AnalysisResult = {
+  /** Set by the backend so a result can be looked up later. */
+  sessionId?: string;
   overallScore: number;
   steps: StepFeedback[];
 };

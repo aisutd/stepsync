@@ -18,6 +18,10 @@ export default function RootLayout() {
       >
         <Stack.Screen name="index" options={{ title: 'StepSync' }} />
         <Stack.Screen name="results" options={{ title: 'Feedback' }} />
+        <Stack.Screen
+          name="record"
+          options={{ headerShown: false, presentation: 'fullScreenModal', animation: 'fade' }}
+        />
       </Stack>
     </SessionProvider>
   );

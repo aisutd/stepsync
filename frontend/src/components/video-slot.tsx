@@ -7,22 +7,36 @@ type Props = {
   title: string;
   hint: string;
   video: PickedVideo | null;
-  onPress: () => void;
+  onChoose: () => void;
+  /** Omit to hide the Record button (for example on web). */
+  onRecord?: () => void;
 };
 
-export function VideoSlot({ title, hint, video, onPress }: Props) {
+export function VideoSlot({ title, hint, video, onChoose, onRecord }: Props) {
   return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [styles.slot, video && styles.filled, pressed && styles.pressed]}
-    >
+    <View style={[styles.slot, video && styles.filled]}>
       <View style={styles.text}>
         <Text style={styles.title}>{title}</Text>
         <Text style={styles.hint} numberOfLines={1}>
           {video ? describe(video) : hint}
         </Text>
       </View>
-      <Text style={styles.action}>{video ? 'Change' : 'Choose'}</Text>
+      <View style={styles.actions}>
+        {onRecord && <Action label="Record" onPress={onRecord} />}
+        <Action label={video ? 'Change' : 'Choose'} onPress={onChoose} />
+      </View>
+    </View>
+  );
+}
+
+function Action({ label, onPress }: { label: string; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={8}
+      style={({ pressed }) => [styles.action, pressed && styles.pressed]}
+    >
+      <Text style={styles.actionText}>{label}</Text>
     </Pressable>
   );
 }
@@ -45,9 +59,16 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   filled: { borderStyle: 'solid', borderColor: colors.accent },
-  pressed: { opacity: 0.7 },
   text: { flex: 1, gap: 4 },
   title: { color: colors.text, fontSize: 17, fontWeight: '600' },
   hint: { color: colors.muted, fontSize: 14 },
-  action: { color: colors.accent, fontSize: 15, fontWeight: '600' },
+  actions: { flexDirection: 'row', gap: 8 },
+  action: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: colors.background,
+  },
+  pressed: { opacity: 0.6 },
+  actionText: { color: colors.accent, fontSize: 15, fontWeight: '600' },
 });
