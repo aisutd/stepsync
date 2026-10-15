@@ -17,6 +17,12 @@ Hip centering removes image placement differences and torso scaling reduces over
 - FastAPI, OpenCV, NumPy, SciPy, PyTorch, and Supabase
 - Pose estimation, TensorFlow Lite, and Gemini
 
+## Local backend
+
+Rodrigo's local YouTube intake/preprocessing phase is documented in
+[backend/README.md](backend/README.md), including setup, Swagger URL requests, tests,
+configurable limits, and the proposed pose handoff. Docker remains a placeholder.
+
 ## Docker Setup
 
 Make sure Docker Desktop is installed and running.
