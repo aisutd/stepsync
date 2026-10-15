@@ -26,3 +26,15 @@ Copy `.env.example` to `.env` and set `EXPO_PUBLIC_API_URL` to your laptop's LAN
 Run FastAPI with `--host 0.0.0.0` so the phone can reach it.
 
 Recording uses expo-camera and only works in the phone app, not the browser.
+
+## Supabase login
+
+Add to `.env` (Dashboard > Project Settings > API), then `npx expo start -c`:
+
+```
+EXPO_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+```
+
+Without these the login screen is skipped so the app still runs.
+Use the publishable (anon) key only, never the secret/service_role key.
