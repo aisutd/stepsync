@@ -1,4 +1,4 @@
-"""Local validation API: Validated YouTube videos are saved to Downloads."""
+"""Local YouTube intake API with synchronous pose extraction."""
 
 import logging
 import shutil
@@ -6,6 +6,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Callable
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -15,12 +16,12 @@ from pydantic import BaseModel
 
 from .config import Settings
 from .handoff import ProcessingState
+from .pose_processing import PoseArtifacts, run_pose_extraction
 from .video import VideoError, validate_video
 from .youtube import download_video, validate_url
 from .storage import save_video
 
 logger = logging.getLogger(__name__)
-DOWNLOADS_DIRECTORY = Path(r"C:\Users\rodri\Downloads")
 
 # Videos uploaded from the phone app by POST /analyze.
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
@@ -51,13 +52,21 @@ class UploadResponse(BaseModel):
     pose_processing: str
     persisted: bool
     saved_path: str
+    pose_preview_path: str | None = None
+    pose_data_path: str | None = None
+    pose_error_code: str | None = None
+    pose_error: str | None = None
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    pose_runner: Callable[[Path, Path, Path, float], PoseArtifacts] | None = None,
+) -> FastAPI:
     settings = settings or Settings.from_env()
+    pose_runner = pose_runner or run_pose_extraction
     app = FastAPI(title="StepSync local video backend", description=(
-        "Validated videos are saved to the local Windows Downloads folder; no authentication, "
-        "database, or pose extraction is connected."
+        "Validated videos are saved locally and processed by the pose extractor. "
+        "No authentication or database is connected."
     ))
 
     # Lets the Expo web build (a different origin) call the API during development.
@@ -95,12 +104,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if size == 0:
                     raise VideoError("empty_file", "The downloaded video is empty.")
                 metadata = validate_video(path, settings)
-                saved = save_video(path, downloaded.title, DOWNLOADS_DIRECTORY)
-                return UploadResponse(
-                    status=ProcessingState.uploaded, source_url=url, filename=saved.name,
-                    size_bytes=size, metadata=MetadataResponse(**asdict(metadata)),
-                    pose_processing="not_connected", persisted=True, saved_path=str(saved),
+                saved = save_video(path, downloaded.title, settings.video_directory)
+            try:
+                artifacts = pose_runner(
+                    saved, settings.pose_results_directory / saved.stem,
+                    settings.pose_model_path, settings.pose_processing_timeout_seconds,
                 )
+            except Exception as error:
+                logger.exception("Pose processing failed for saved video %s", saved)
+                return UploadResponse(
+                    status=ProcessingState.failed, source_url=url, filename=saved.name,
+                    size_bytes=size, metadata=MetadataResponse(**asdict(metadata)),
+                    pose_processing="failed", persisted=True, saved_path=str(saved),
+                    pose_error_code=error.code if isinstance(error, VideoError) else "pose_processing_failed",
+                    pose_error=error.message if isinstance(error, VideoError) else "Pose extraction failed. Check the backend logs.",
+                )
+            return UploadResponse(
+                status=ProcessingState.completed, source_url=url, filename=saved.name,
+                size_bytes=size, metadata=MetadataResponse(**asdict(metadata)),
+                pose_processing="completed", persisted=True, saved_path=str(saved),
+                pose_preview_path=str(artifacts.preview_path), pose_data_path=str(artifacts.data_path),
+            )
         except VideoError:
             raise
         except Exception:

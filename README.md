@@ -10,6 +10,12 @@ The pose CSV keeps the original `x_norm`, `y_norm`, `z_relative`, and `world_*` 
 
 Hip centering removes image placement differences and torso scaling reduces overall body-size differences. It does not make 2D camera viewpoints or individual limb proportions identical. Compare joint angles or normalized bone directions alongside these coordinates, confidence values, and a consistent left/right mirroring convention for more robust pose matching. Camera viewpoint changes may still require calibration or a compatible camera setup.
 
+The CSV also preserves raw coordinates and adds `smooth_x_norm`, `smooth_y_norm`,
+`smooth_z_relative`, and `smooth_hip_relative_*_norm` fields. These use a
+confidence-gated One Euro filter; the preview uses smoothed image coordinates.
+Filters reset when tracking is unreliable or missing and leave gaps blank.
+Use consistent filter settings for reference and webcam poses. Smoothing can add lag.
+
 ## Planned Technologies
 
 - Python, TypeScript, and SQL
@@ -19,9 +25,10 @@ Hip centering removes image placement differences and torso scaling reduces over
 
 ## Local backend
 
-Rodrigo's local YouTube intake/preprocessing phase is documented in
-[backend/README.md](backend/README.md), including setup, Swagger URL requests, tests,
-configurable limits, and the proposed pose handoff. Docker remains a placeholder.
+The local YouTube intake and automatic pose-processing workflow is documented in
+[backend/README.md](backend/README.md), including setup, Swagger requests, tests,
+configurable limits, and storage. Start it from the project root with
+`.\run-local.ps1`, then open http://127.0.0.1:8000/docs. Docker remains a placeholder.
 
 ## Docker Setup
 
