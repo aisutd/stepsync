@@ -2,6 +2,7 @@ import cv2
 import csv
 import math
 import argparse
+from collections import deque
 from pathlib import Path
 
 import mediapipe as mp
@@ -15,6 +16,16 @@ from mediapipe.tasks.python import vision
 
 LANDMARK_THRESHOLD = 0.50
 FRAME_OK_THRESHOLD = 0.75
+MIN_POSE_DETECTION_CONFIDENCE = 0.50
+MIN_POSE_PRESENCE_CONFIDENCE = 0.50
+MIN_TRACKING_CONFIDENCE = 0.50
+SMOOTHING_WINDOW_FRAMES = 3
+# Small rapid reversals are a jitter heuristic, not a MediaPipe output flag.
+IMAGE_JITTER_MAX_STEP = 0.03  # Normalized image coordinates.
+TORSO_JITTER_MAX_STEP = 0.10  # Torso lengths.
+JITTER_MIN_STEP = 0.0001
+JITTER_REVERSAL_COSINE = -0.5
+JITTER_MAX_INTERVAL_SECONDS = 0.10
 
 # The 12 major body joints used to decide whether a frame is reliable.
 CORE_LANDMARKS = [
@@ -174,48 +185,53 @@ def normalize_world_pose(pose, world_pose):
     return normalized_coordinates, torso_scale_m
 
 
-class OneEuroFilter:
-    """Adaptive smoothing of a 3D point, using timestamps in seconds."""
+class ConditionalJitterSmoother:
+    """Pass reliable points through; average only small rapid direction reversals.
 
-    def __init__(self, min_cutoff=1.0, beta=0.05, derivative_cutoff=1.0):
-        if (not all(math.isfinite(v) for v in (min_cutoff, beta, derivative_cutoff))
-                or min_cutoff <= 0 or derivative_cutoff <= 0 or beta < 0):
-            raise ValueError("Filter cutoffs must be positive and beta nonnegative.")
-        self.min_cutoff = min_cutoff
-        self.beta = beta
-        self.derivative_cutoff = derivative_cutoff
-        self.reset()
+    MediaPipe exposes confidence, not jitter flags. This temporal heuristic can
+    confuse small deliberate reversals with jitter, and needs three raw samples.
+    """
+
+    def __init__(self, window_size=SMOOTHING_WINDOW_FRAMES, max_step=IMAGE_JITTER_MAX_STEP):
+        if isinstance(window_size, bool) or not isinstance(window_size, int) or window_size < 3:
+            raise ValueError("The jitter window must be an integer of at least three.")
+        if not math.isfinite(max_step) or max_step <= JITTER_MIN_STEP:
+            raise ValueError("The jitter step limit must exceed the minimum step.")
+        self.points = deque(maxlen=window_size)
+        self.max_step = max_step
+        self.timestamp = None
+        self.jitter_detected = False
 
     def reset(self):
+        self.points.clear()
         self.timestamp = None
-        self.raw = None
-        self.filtered = None
-        self.derivative = (0.0, 0.0, 0.0)
+        self.jitter_detected = False
 
-    @staticmethod
-    def alpha(cutoff, dt):
-        return 1.0 / (1.0 + 1.0 / (2.0 * math.pi * cutoff * dt))
-
-    def update(self, timestamp, point):
-        point = tuple(point)
-        if len(point) != 3 or not all(math.isfinite(v) for v in (*point, timestamp)):
+    def update(self, timestamp, point, visibility, presence):
+        if (point is None or len(point) != 3
+                or any(v is None or not math.isfinite(v) for v in (*point, timestamp, visibility, presence))
+                or visibility < LANDMARK_THRESHOLD or presence < LANDMARK_THRESHOLD):
             self.reset()
             return None
-        if self.timestamp is None or timestamp <= self.timestamp:
+        if self.timestamp is not None and (timestamp <= self.timestamp
+                or timestamp - self.timestamp > JITTER_MAX_INTERVAL_SECONDS):
             self.reset()
-            self.timestamp, self.raw, self.filtered = timestamp, point, point
-            return point
-        dt = timestamp - self.timestamp
-        derivative_alpha = self.alpha(self.derivative_cutoff, dt)
-        self.derivative = tuple(
-            derivative_alpha * (point[i] - self.raw[i]) / dt
-            + (1.0 - derivative_alpha) * self.derivative[i]
-            for i in range(3)
-        )
-        alphas = [self.alpha(self.min_cutoff + self.beta * abs(v), dt) for v in self.derivative]
-        self.filtered = tuple(alphas[i] * point[i] + (1.0 - alphas[i]) * self.filtered[i] for i in range(3))
-        self.timestamp, self.raw = timestamp, point
-        return self.filtered
+        self.points.append(tuple(point))
+        self.timestamp = timestamp
+        self.jitter_detected = False
+        if len(self.points) >= 3:
+            first, middle, last = list(self.points)[-3:]
+            before = tuple(middle[i] - first[i] for i in range(3))
+            after = tuple(last[i] - middle[i] for i in range(3))
+            before_size = math.hypot(*before)
+            after_size = math.hypot(*after)
+            if (JITTER_MIN_STEP <= before_size <= self.max_step
+                    and JITTER_MIN_STEP <= after_size <= self.max_step):
+                cosine = sum(before[i] * after[i] for i in range(3)) / (before_size * after_size)
+                self.jitter_detected = cosine <= JITTER_REVERSAL_COSINE
+        if self.jitter_detected:
+            return tuple(sum(p[axis] for p in self.points) / len(self.points) for axis in range(3))
+        return tuple(point)
 
 
 def pixel_position(landmark, width, height):
@@ -320,9 +336,9 @@ def main(input_video, output_video, output_csv, model_path):
         base_options=base_options,
         running_mode=vision.RunningMode.VIDEO,
         num_poses=1,
-        min_pose_detection_confidence=0.50,
-        min_pose_presence_confidence=0.50,
-        min_tracking_confidence=0.50,
+        min_pose_detection_confidence=MIN_POSE_DETECTION_CONFIDENCE,
+        min_pose_presence_confidence=MIN_POSE_PRESENCE_CONFIDENCE,
+        min_tracking_confidence=MIN_TRACKING_CONFIDENCE,
     )
 
     # -----------------------------
@@ -367,8 +383,8 @@ def main(input_video, output_video, output_csv, model_path):
             total_frames = 0
             no_pose_frames = 0
             low_confidence_frames = 0
-            image_filters = [OneEuroFilter() for _ in LANDMARK_NAMES]
-            normalized_filters = [OneEuroFilter() for _ in LANDMARK_NAMES]
+            image_filters = [ConditionalJitterSmoother() for _ in LANDMARK_NAMES]
+            normalized_filters = [ConditionalJitterSmoother(max_step=TORSO_JITTER_MAX_STEP) for _ in LANDMARK_NAMES]
 
             while True:
                 success, frame = cap.read()
@@ -473,7 +489,8 @@ def main(input_video, output_video, output_csv, model_path):
                     reliable = landmark_is_reliable(landmark)
                     if reliable:
                         smoothed_image_pose.append(image_filters[landmark_id].update(
-                            timestamp_seconds, (landmark.x, landmark.y, landmark.z)))
+                            timestamp_seconds, (landmark.x, landmark.y, landmark.z),
+                            landmark.visibility, landmark.presence))
                     else:
                         image_filters[landmark_id].reset()
                         smoothed_image_pose.append(None)
@@ -482,7 +499,7 @@ def main(input_video, output_video, output_csv, model_path):
                                   else None)
                     if reliable and normalized is not None:
                         smoothed_normalized_pose.append(normalized_filters[landmark_id].update(
-                            timestamp_seconds, normalized))
+                            timestamp_seconds, normalized, landmark.visibility, landmark.presence))
                     else:
                         normalized_filters[landmark_id].reset()
                         smoothed_normalized_pose.append(None)

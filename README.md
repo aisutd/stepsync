@@ -12,9 +12,20 @@ Hip centering removes image placement differences and torso scaling reduces over
 
 The CSV also preserves raw coordinates and adds `smooth_x_norm`, `smooth_y_norm`,
 `smooth_z_relative`, and `smooth_hip_relative_*_norm` fields. These use a
-confidence-gated One Euro filter; the preview uses smoothed image coordinates.
-Filters reset when tracking is unreliable or missing and leave gaps blank.
-Use consistent filter settings for reference and webcam poses. Smoothing can add lag.
+conditional three-frame moving average gated by MediaPipe landmark visibility
+and presence (both at least `0.50`). Reliable points pass through unchanged
+unless two small consecutive displacements reverse direction by at least 120
+degrees, each at most 100 ms apart. Only then is the trailing average used.
+The step limits are `0.03` in normalized image coordinates and `0.10` in torso
+lengths; steps below `0.0001` are ignored. Adjust the jitter constants near the
+top of `backend/pose_extraction.py`. The preview uses these processed coordinates.
+
+This is an application heuristic: MediaPipe's legacy `smooth_landmarks` option
+enables smoothing and does not expose a jitter-detection flag. The Tasks API used
+here has no such flag. Small deliberate reversals can be classified as jitter;
+isolated jumps and the first two samples are not corrected by this check.
+Histories reset when tracking is unreliable, missing, or more than 100 ms apart;
+gaps stay blank. Use consistent settings for reference and webcam poses.
 
 ## Planned Technologies
 
