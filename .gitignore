@@ -3,4 +3,7 @@ backend/venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+Lucy
+backend/output/features/
 .local-tools/
+main-mentee
