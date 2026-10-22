@@ -130,3 +130,7 @@ JSON-in-storage, and where `owner_id` lives. Waiting on Kaitlyn: whether the CSV
 stays one row per landmark, and whether world coordinates are always present
 when `pose_present = 1`. Waiting on Rodrigo: calling the steps above from the
 pipeline. No teammate functionality is implemented.
+
+## Known Issues
+
+- Forest clip: pose extraction finds a person in only 19 of 689 frames, so most features are missing. Use Reze for testing
