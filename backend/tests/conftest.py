@@ -22,6 +22,22 @@ def video(tmp_path):
 
 @pytest.fixture(autouse=True)
 def isolated_downloads(tmp_path, monkeypatch):
-    directory = tmp_path / "Downloads"
-    monkeypatch.setattr("app.main.DOWNLOADS_DIRECTORY", directory)
+    directory = tmp_path / "data" / "videos"
+    monkeypatch.setenv("STEPSYNC_DATA_DIRECTORY", str(directory.parent))
     return directory
+
+
+@pytest.fixture(autouse=True)
+def fake_pose_runner(monkeypatch):
+    from app.pose_processing import PoseArtifacts
+
+    def run(video_path, output_directory, model_path, timeout_seconds):
+        assert video_path.is_file()
+        output_directory.mkdir(parents=True, exist_ok=True)
+        preview = output_directory / "skeleton_preview.mp4"
+        data = output_directory / "pose_data.csv"
+        preview.write_bytes(b"mock preview")
+        data.write_text("frame_index,pose_present\n0,0\n")
+        return PoseArtifacts(preview, data)
+
+    monkeypatch.setattr("app.main.run_pose_extraction", run)
