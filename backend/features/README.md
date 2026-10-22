@@ -57,7 +57,7 @@ straight.
 | `left/right_<joint>_velocity` | degrees/s | How fast each angle above changes. Positive = opening (straightening), negative = closing |
 | `left/right_wrist_speed`, `left/right_ankle_speed` | m/s | How fast the keypoint moves. World coordinates are hip-centred, so this is speed relative to the body |
 
-Velocities and speeds compare each frame with the one before it, using the
+Velocities and speeds compare each frame with the frame FRAME_GAP (4) steps earlier, using the
 actual `timestamp_ms` difference rather than an assumed frame rate.
 
 ## Missing values and saved format
@@ -70,7 +70,7 @@ A value is `null`, never 0, and carries a `missing_reason`:
 | `unreliable:<joint>` | That joint has `landmark_reliable = 0` (Kaitlyn's visibility/presence ≥ 0.5 rule) |
 | `no_coordinates:<joint>` | The joint is absent or its world coordinates are blank |
 | `degenerate_geometry` | Two joints are at the same point, so the angle is undefined |
-| `first_frame` | Velocity only: there is no earlier frame to compare with |
+| `first_frame` | Velocity only: there is not enough earlier frames yet to compare with |
 | `angle_missing_in_this_or_previous_frame`, `unavailable:<joint>` | Velocity only: one of the two frames lacks the value |
 | `non_increasing_timestamp` | Velocity only: the timestamp did not increase |
 
@@ -111,7 +111,7 @@ A 60-second clip (Rodrigo's limit) at 30 fps gives 1,800 frames × 20 features =
 private storage and keep a single row that points to it. Row-level security can
 use the owner on `reference_videos`.
 
-## Lucy's proposed handoff (not a final team contract)
+## My proposed handoff (not a final team contract)
 
 - `read_pose_csv(path)` returns a list of `PoseFrame` (frame index, timestamp,
   status, landmarks by name) from Kaitlyn's CSV.
