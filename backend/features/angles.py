@@ -1,14 +1,4 @@
-"""Joint-angle features from pose frames.
-
-Each feature is the angle at a joint between the two body segments that meet
-there, e.g. the left elbow angle is between elbow->shoulder and elbow->wrist.
-A straight limb is ~180 degrees.
-
-Angles use MediaPipe's 3D world coordinates (meters), so they don't depend on
-video size or aspect ratio and include depth. A value is missing (None, with a
-reason) when the frame has no pose or a needed landmark is unreliable or has
-no coordinates. Missing values are never written as 0.
-"""
+"""Copmutes joint angles for each from from the pose CSV."""
 
 import math
 from dataclasses import dataclass

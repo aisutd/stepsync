@@ -1,119 +1,132 @@
-# Feature extraction and storage (Lucy)
+# Pose feature extraction and Supabase storage (Lucy)
 
-Reads the pose CSV from `pose_extraction.py` (Kaitlyn), calculates joint angles
-for every frame, and saves and loads them by video ID. It uses only the Python
-standard library.
-
-## Run
-
-From `stepsync/backend`:
+Run from `stepsync/backend` in PowerShell, using the existing Python 3.12 venv:
 
 ```powershell
+.\venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 python -m features output/reze_pose_data.csv --video-id reze --csv --frame 0 --frame 150
-python -m features output/reze_pose_data.csv --video-id reze --supabase
+```
+
+This reads Kaitlyn's pose CSV, calculates the features for every frame, and
+writes `output/features/reze_features.json` plus a `.csv` copy. `--frame` prints
+that frame's values for a manual check: open the skeleton preview video at the
+same frame and confirm that a straight limb reads near 180° and a right angle
+near 90°. In frame 0 of the Reze clip, the raised left arm reads about 172° at
+the shoulder and the straight legs read 159–167°. Add `--supabase` to also save
+the rows to Supabase (see **Configurable settings**). The feature code uses only
+the Python standard library; no extra package is needed for Supabase.
+
+Run tests from `backend`:
+
+```powershell
 python -m pytest tests/test_features.py tests/test_velocity.py -q
 ```
 
-The first command writes `output/features/reze_features.json`, plus a `.csv`
-copy, and prints the angles for the chosen frames. Compare those against the
-skeleton preview video as a manual check.
+Tests use small synthetic pose CSVs written to temporary directories, plus
+Kaitlyn's real outputs in `output/`. Supabase calls are replaced with an
+in-memory fake, so tests never need network access or Supabase keys.
 
-## Features (all in degrees)
+## Configurable settings
 
-| Feature | Angle at | Between |
-|---|---|---|
-| `left/right_elbow_angle` | elbow | shoulder, wrist |
-| `left/right_knee_angle` | knee | hip, ankle |
-| `left/right_shoulder_angle` | shoulder | elbow, hip |
-| `left/right_hip_angle` | hip | shoulder, knee |
+Set environment variables before running with `--supabase`. Never commit them.
+There is no dotenv loader.
 
-180° means the limb is straight. Angles use MediaPipe's 3D **world**
-coordinates (`world_x/y/z`, in meters), so they don't depend on video size and
-they include depth.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SUPABASE_URL` | none | Project URL, e.g. `https://<project>.supabase.co` |
+| `SUPABASE_KEY` | none | A key allowed to write `pose_features` (service role, or anon with a matching row-level-security policy) |
 
-## Velocity features
+Example: `$env:SUPABASE_URL = "https://<project>.supabase.co"`.
+Before the first save, run `features/schema_postgres.sql` once in the Supabase
+SQL editor. It creates the `pose_features` table and the `pose_features_wide`
+view. Without both variables, `--supabase` stops with an error naming them.
 
-`features/velocity.py` compares each frame with the one before it:
+## Features
+
+Angles use MediaPipe's 3D **world** coordinates (`world_x/y/z`, in meters), so
+they don't depend on video size and they include depth. 180° means the limb is
+straight.
 
 | Feature | Units | Meaning |
-|---|---|---|
-| `left/right_elbow/knee/shoulder/hip_velocity` | degrees/s | How fast each joint angle changes. Positive = opening (straightening), negative = closing |
-| `left/right_wrist_speed`, `left/right_ankle_speed` | m/s | How fast the keypoint moves in MediaPipe world coordinates (hip-centred, so relative to the body) |
+| --- | --- | --- |
+| `left/right_elbow_angle` | degrees | Angle at the elbow, between shoulder and wrist |
+| `left/right_knee_angle` | degrees | Angle at the knee, between hip and ankle |
+| `left/right_shoulder_angle` | degrees | Angle at the shoulder, between elbow and hip |
+| `left/right_hip_angle` | degrees | Angle at the hip, between shoulder and knee |
+| `left/right_<joint>_velocity` | degrees/s | How fast each angle above changes. Positive = opening (straightening), negative = closing |
+| `left/right_wrist_speed`, `left/right_ankle_speed` | m/s | How fast the keypoint moves. World coordinates are hip-centred, so this is speed relative to the body |
 
-A velocity is missing when the frame has no pose, on the first frame, or when
-the value is missing in this or the previous frame.
+Velocities and speeds compare each frame with the one before it, using the
+actual `timestamp_ms` difference rather than an assumed frame rate.
 
-## Missing values
+## Missing values and saved format
 
 A value is `null`, never 0, and carries a `missing_reason`:
 
 | Reason | Meaning |
-|---|---|
+| --- | --- |
 | `no_pose_detected` | The frame is `NO_POSE` |
 | `unreliable:<joint>` | That joint has `landmark_reliable = 0` (Kaitlyn's visibility/presence ≥ 0.5 rule) |
 | `no_coordinates:<joint>` | The joint is absent or its world coordinates are blank |
 | `degenerate_geometry` | Two joints are at the same point, so the angle is undefined |
+| `first_frame` | Velocity only: there is no earlier frame to compare with |
+| `angle_missing_in_this_or_previous_frame`, `unavailable:<joint>` | Velocity only: one of the two frames lacks the value |
+| `non_increasing_timestamp` | Velocity only: the timestamp did not increase |
 
 Each row also keeps Kaitlyn's `frame_status`, so a frame marked
 `LOW_CONFIDENCE` can be filtered out later if needed. Even frames marked `OK`
-can have a few unreliable joints, since that status only needs 75% of the core joints.
-
-## Saved format
+can have a few unreliable joints, since that status only needs 75% of the core
+joints.
 
 `output/features/<video_id>_features.json`:
 
 ```json
 {
-  "schema_version": 1, "feature_set_version": 1, "video_id": "reze",
+  "schema_version": 1, "feature_set_version": 2, "video_id": "reze",
   "source_pose_file": "reze_pose_data.csv", "coordinate_space": "mediapipe_world_meters",
   "feature_definitions": [{"name": "left_elbow_angle", "units": "degrees",
                            "joints": ["left_shoulder", "left_elbow", "left_wrist"]}],
   "rows": [{"frame_index": 0, "timestamp_ms": 0, "frame_status": "OK",
-            "feature": "left_elbow_angle", "value": 161.9, "units": "degrees",
+            "feature": "left_elbow_angle", "value": 162.2, "units": "degrees",
             "status": "ok", "missing_reason": null}]
 }
 ```
 
-## Supabase
+`load_features(directory, video_id)` reads the file back and rejects a file
+that belongs to a different video or has rows with missing fields.
 
-Rows are stored in the `pose_features` table in Supabase (one row per frame
-per feature). `select * from pose_features_wide where video_id = 'reze'` shows
-one row per frame with one column per feature.
+## Supabase table
 
-1. In the Supabase SQL editor, run `features/schema_postgres.sql` once.
-2. Set `SUPABASE_URL` and `SUPABASE_KEY` (environment variables, never committed).
-3. `python -m features <pose csv> --video-id <id> --supabase` replaces that
-   video's rows; `load_features_supabase(video_id)` reads them back.
+`pose_features` holds one row per frame per feature, with the same fields as a
+JSON row plus `video_id`. The primary key is `(video_id, frame_index, feature)`.
+Saving a video first deletes that video's existing rows, then inserts the new
+ones in batches of 1,000, so re-running replaces rather than duplicates.
+`load_features_supabase(video_id)` returns the rows ordered by frame, then
+feature. `select * from pose_features_wide where video_id = 'reze'` shows one
+row per frame with one column per feature.
 
-`video_id` is text for now. It should become the team's video ID (uuid
-referencing the videos table) once that table exists.
-
-## Proposed database table (to confirm with Satwik and Aronno)
-
-`to_db_rows()` returns exactly these fields:
-
-```sql
-create table pose_features (
-  video_id       uuid not null references reference_videos(id) on delete cascade,
-  frame_index    integer not null,
-  timestamp_ms   integer not null,
-  frame_status   text not null,          -- OK / LOW_CONFIDENCE / NO_POSE
-  feature        text not null,
-  value          double precision,       -- null when missing
-  units          text not null,
-  status         text not null check (status in ('ok', 'missing')),
-  missing_reason text,
-  primary key (video_id, frame_index, feature)
-);
-```
-
-A 60-second clip (Rodrigo's limit) at 30 fps gives 1,800 frames × 8 features =
-14,400 rows. If that's too many, another option is to upload the JSON file to
+A 60-second clip (Rodrigo's limit) at 30 fps gives 1,800 frames × 20 features =
+36,000 rows. If that's too many, another option is to upload the JSON file to
 private storage and keep a single row that points to it. Row-level security can
 use the owner on `reference_videos`.
 
-## Open questions
+## Lucy's proposed handoff (not a final team contract)
 
-- **Satwik and Aronno:** video ID type (uuid?), table vs. JSON-in-storage, and where `owner_id` lives.
-- **Kaitlyn:** will the CSV stay one row per landmark? Will the world coordinates always be present when `pose_present = 1`?
-- **Rodrigo:** the pipeline should call `read_pose_csv` → `compute_features(video_id, frames)` → `save_features` after pose extraction.
+- `read_pose_csv(path)` returns a list of `PoseFrame` (frame index, timestamp,
+  status, landmarks by name) from Kaitlyn's CSV.
+- `compute_features(video_id, frames)` returns the features document above.
+- `save_features(doc, directory)` and `load_features(directory, video_id)`
+  write and read the JSON file.
+- `save_features_supabase(doc)` and `load_features_supabase(video_id)` write
+  and read the Supabase table.
+
+After pose extraction, the pipeline should call `read_pose_csv` →
+`compute_features` → `save_features_supabase`.
+
+Waiting on Satwik/Aronno: video ID type and the videos table. `video_id` is
+text for now and should become a uuid referencing that table. Also table vs.
+JSON-in-storage, and where `owner_id` lives. Waiting on Kaitlyn: whether the CSV
+stays one row per landmark, and whether world coordinates are always present
+when `pose_present = 1`. Waiting on Rodrigo: calling the steps above from the
+pipeline. No teammate functionality is implemented.
