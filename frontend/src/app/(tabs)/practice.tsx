@@ -42,10 +42,11 @@ export default function HomeScreen() {
 
       <VideoSlot
         title="Reference video"
-        hint="The choreography you want to match"
+        hint="The choreography you want to learn"
         video={reference}
         onChoose={async () => setReference((await pickVideo()) ?? reference)}
         onRecord={canRecord ? () => router.push('/record?slot=reference') : undefined}
+        onYouTube={() => router.push('/youtube?from=practice')}
       />
       <VideoSlot
         title="Practice video"

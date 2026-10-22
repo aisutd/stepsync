@@ -6,6 +6,36 @@ export type PickedVideo = {
   fileName: string;
   mimeType: string;
   durationMs: number | null;
+  /** Set when the video came from a YouTube link instead of the phone. */
+  youtube?: YouTubeSource;
+};
+
+export type YouTubeSource = {
+  url: string;
+  videoId: string;
+  isShort: boolean;
+  title: string;
+  /** Name the backend saved it under; null in mock mode (nothing was downloaded). */
+  serverFilename: string | null;
+  /** Set when the video saved but Kaitlyn's pose extraction failed on it. */
+  poseWarning?: string;
+};
+
+/** Response of POST /reference-videos (Rodrigo's YouTube intake). */
+export type YouTubeImportResponse = {
+  status: 'uploaded' | 'processing' | 'completed' | 'failed';
+  source_url: string;
+  filename: string;
+  size_bytes: number;
+  metadata: { duration_seconds: number; width: number; height: number; fps: number };
+  pose_processing: string;
+  persisted: boolean;
+  pose_error?: string | null;
+  /** Whether the keypoints and motion features reached Supabase. */
+  supabase_status: 'saved' | 'not_configured' | 'skipped' | 'failed';
+  supabase_video_id?: string | null;
+  supabase_error?: string | null;
+  frames_saved?: number | null;
 };
 
 export type StepFeedback = {

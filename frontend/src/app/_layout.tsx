@@ -40,6 +40,15 @@ function RootStack() {
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
           <Stack.Screen name="results" options={{ title: 'Feedback' }} />
           <Stack.Screen
+            name="youtube"
+            options={{
+              headerShown: false,
+              presentation: 'transparentModal',
+              animation: 'fade',
+              contentStyle: { backgroundColor: 'transparent' },
+            }}
+          />
+          <Stack.Screen
             name="record"
             options={{ headerShown: false, presentation: 'fullScreenModal', animation: 'fade' }}
           />

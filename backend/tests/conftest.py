@@ -41,3 +41,10 @@ def fake_pose_runner(monkeypatch):
         return PoseArtifacts(preview, data)
 
     monkeypatch.setattr("app.main.run_pose_extraction", run)
+
+
+@pytest.fixture(autouse=True)
+def no_real_supabase(monkeypatch):
+    """Tests must never write to the team's real Supabase project."""
+    monkeypatch.delenv("STEPSYNC_SUPABASE_URL", raising=False)
+    monkeypatch.delenv("STEPSYNC_SUPABASE_SECRET_KEY", raising=False)

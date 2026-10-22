@@ -13,6 +13,7 @@ export default function HomeScreen() {
   const recent = routines.find((r) => r.id === continueWatching.routineId) ?? routines[0];
   const fraction = progress.movesCompleted / progress.movesTotal;
   const goPractice = () => router.push('/practice');
+  const goUpload = () => router.push('/youtube?from=home');
 
   return (
     <ScrollView
@@ -48,11 +49,21 @@ export default function HomeScreen() {
         </View>
       </View>
 
-      <Pressable onPress={goPractice} style={({ pressed }) => [styles.cta, pressed && styles.pressed]}>
-        <Ionicons name="play" size={16} color={colors.onPrimary} />
-        <Text style={styles.ctaText}>Start Learning</Text>
-        <Ionicons name="arrow-forward" size={18} color={colors.onPrimary} />
-      </Pressable>
+      <View style={styles.ctaRow}>
+        <Pressable onPress={goPractice} style={({ pressed }) => [styles.cta, pressed && styles.pressed]}>
+          <Ionicons name="play" size={16} color={colors.onPrimary} />
+          <Text style={styles.ctaText}>Start Learning</Text>
+          <Ionicons name="arrow-forward" size={18} color={colors.onPrimary} />
+        </Pressable>
+        <Pressable
+          onPress={goUpload}
+          accessibilityLabel="Upload a YouTube Short"
+          style={({ pressed }) => [styles.uploadButton, pressed && styles.pressed]}
+        >
+          <Ionicons name="cloud-upload-outline" size={18} color={colors.text} />
+          <Text style={styles.uploadText}>Upload</Text>
+        </Pressable>
+      </View>
 
       {/* Progress */}
       <Pressable onPress={goPractice} style={({ pressed }) => [styles.card, styles.row, pressed && styles.pressed]}>
@@ -110,7 +121,7 @@ export default function HomeScreen() {
             </Pressable>
           );
         })}
-        <Pressable onPress={goPractice} style={styles.routine}>
+        <Pressable onPress={goUpload} style={styles.routine}>
           <View style={[styles.routineImageWrap, styles.addTile]}>
             <Ionicons name="add" size={30} color={colors.text} />
           </View>
@@ -149,6 +160,18 @@ const styles = StyleSheet.create({
   subhead: { color: colors.muted, fontSize: 14, lineHeight: 20, marginTop: 8, maxWidth: 150 },
   rule: { width: 32, height: 1.5, backgroundColor: colors.accentSoft, marginTop: 14 },
 
+  ctaRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  uploadButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    height: 50,
+    paddingHorizontal: 20,
+    borderRadius: radius.pill,
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+  },
+  uploadText: { color: colors.text, fontSize: 15, fontWeight: '600' },
   cta: {
     alignSelf: 'flex-start',
     flexDirection: 'row',

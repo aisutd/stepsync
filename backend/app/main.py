@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Callable
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -20,6 +20,7 @@ from .pose_processing import PoseArtifacts, run_pose_extraction
 from .video import VideoError, validate_video
 from .youtube import download_video, validate_url
 from .storage import save_video
+from .supabase_store import SupabaseError, SupabaseStore, add_motion_features, load_pose_frames
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +57,24 @@ class UploadResponse(BaseModel):
     pose_data_path: str | None = None
     pose_error_code: str | None = None
     pose_error: str | None = None
+    # Supabase: "saved", "not_configured", "skipped" (no keypoints) or "failed".
+    supabase_status: str = "not_configured"
+    supabase_video_id: str | None = None
+    supabase_error: str | None = None
+    frames_saved: int | None = None
+
+
+_FROM_ENV = object()
 
 
 def create_app(
     settings: Settings | None = None,
     pose_runner: Callable[[Path, Path, Path, float], PoseArtifacts] | None = None,
+    supabase_store: "SupabaseStore | None | object" = _FROM_ENV,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     pose_runner = pose_runner or run_pose_extraction
+    store = SupabaseStore.from_env() if supabase_store is _FROM_ENV else supabase_store
     app = FastAPI(title="StepSync local video backend", description=(
         "Validated videos are saved locally and processed by the pose extractor. "
         "No authentication or database is connected."
@@ -90,7 +101,7 @@ def create_app(
         }})
 
     @app.post("/reference-videos", response_model=UploadResponse, status_code=200)
-    def upload_video(request: YouTubeRequest):
+    def upload_video(request: YouTubeRequest, authorization: str | None = Header(default=None)):
         try:
             url = validate_url(request.url)
             with TemporaryDirectory(prefix="stepsync-youtube-") as directory:
@@ -118,12 +129,18 @@ def create_app(
                     pose_processing="failed", persisted=True, saved_path=str(saved),
                     pose_error_code=error.code if isinstance(error, VideoError) else "pose_processing_failed",
                     pose_error=error.message if isinstance(error, VideoError) else "Pose extraction failed. Check the backend logs.",
+                    supabase_status="skipped",
+                    supabase_error="Nothing was saved to Supabase because pose extraction failed.",
                 )
+            supabase_result = save_to_supabase(
+                store, artifacts.data_path, url, downloaded.title, saved, metadata, authorization,
+            )
             return UploadResponse(
                 status=ProcessingState.completed, source_url=url, filename=saved.name,
                 size_bytes=size, metadata=MetadataResponse(**asdict(metadata)),
                 pose_processing="completed", persisted=True, saved_path=str(saved),
                 pose_preview_path=str(artifacts.preview_path), pose_data_path=str(artifacts.data_path),
+                **supabase_result,
             )
         except VideoError:
             raise
@@ -132,13 +149,27 @@ def create_app(
             raise VideoError("processing_failed", "Video inspection failed unexpectedly. Check the backend logs.", 500)
 
     @app.post("/analyze")
-    def analyze(reference: UploadFile = File(...), practice: UploadFile = File(...)) -> dict:
-        """Receives the reference and practice videos from the phone app."""
+    def analyze(
+        practice: UploadFile = File(...),
+        reference: UploadFile | None = File(None),
+        reference_video: str | None = Form(None),
+    ) -> dict:
+        """Receives the practice video from the phone app plus the reference, sent either
+        as a video file or as the `filename` POST /reference-videos returned for a YouTube link."""
+        if (reference is None) == (reference_video is None):
+            raise HTTPException(
+                422, "Send exactly one of 'reference' (a video file) or 'reference_video' "
+                "(a filename from /reference-videos).",
+            )
+        saved_reference = (
+            find_saved_video(reference_video, settings.video_directory)
+            if reference_video is not None else None
+        )
         session_id = uuid.uuid4().hex
         session_dir = UPLOAD_DIR / session_id
         session_dir.mkdir(parents=True)
         try:
-            reference_path = save_upload(reference, session_dir, "reference")
+            reference_path = saved_reference or save_upload(reference, session_dir, "reference")
             practice_path = save_upload(practice, session_dir, "practice")
         except HTTPException:
             shutil.rmtree(session_dir, ignore_errors=True)
@@ -148,6 +179,46 @@ def create_app(
         return placeholder_result(session_id, reference_path, practice_path)
 
     return app
+
+
+def save_to_supabase(store, data_path: Path, url: str, title: str, saved: Path, metadata, authorization) -> dict:
+    """Store the keypoints and motion features; never fails the import, reports status instead."""
+    if store is None:
+        return {"supabase_status": "not_configured", "supabase_error": (
+            "The backend isn't connected to Supabase. Set STEPSYNC_SUPABASE_URL and "
+            "STEPSYNC_SUPABASE_SECRET_KEY in backend/.env and restart it."
+        )}
+    try:
+        frames = load_pose_frames(data_path)
+        summary = add_motion_features(frames)
+        user_id = None
+        if authorization and authorization.lower().startswith("bearer "):
+            user_id = store.user_id_for_token(authorization[7:].strip())
+        video = {
+            "user_id": user_id, "source_url": url, "youtube_id": url.rsplit("v=", 1)[-1],
+            "title": title or saved.stem, "filename": saved.name,
+            "duration_seconds": metadata.duration_seconds, "fps": metadata.fps,
+            "width": metadata.width, "height": metadata.height, "frame_count": len(frames), **summary,
+        }
+        video_id = store.save_reference(video, frames)
+        return {"supabase_status": "saved", "supabase_video_id": video_id, "frames_saved": len(frames)}
+    except SupabaseError as error:
+        return {"supabase_status": "failed", "supabase_error": str(error)}
+    except Exception:
+        logger.exception("Could not prepare pose data from %s for Supabase", data_path)
+        return {"supabase_status": "failed", "supabase_error": "Couldn't read the pose data to save it. Check the backend logs."}
+
+
+def find_saved_video(name: str, directory: Path) -> Path:
+    """Look up a video saved by /reference-videos. Only a bare filename is accepted,
+    never a path, so a client can't point the server at other files."""
+    if not name or name in {".", ".."} or Path(name).name != name or "\\" in name:
+        raise HTTPException(400, "reference_video must be a filename returned by /reference-videos.")
+    directory = directory.resolve()
+    path = (directory / name).resolve()
+    if path.parent != directory or not path.is_file():
+        raise HTTPException(404, "That reference video was not found on the server. Import the link again.")
+    return path
 
 
 def save_upload(upload: UploadFile, folder: Path, stem: str) -> Path:

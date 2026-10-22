@@ -19,7 +19,7 @@ export function PrimaryButton({ label, onPress, loading, disabled, arrow = true,
     <Pressable
       onPress={onPress}
       disabled={inactive}
-      style={({ pressed }) => [styles.button, inactive && styles.disabled, pressed && styles.pressed, style]}
+      style={({ pressed }) => [styles.button, disabled && !loading && styles.disabled, pressed && styles.pressed, style]}
     >
       {loading ? (
         <ActivityIndicator color={colors.onPrimary} />

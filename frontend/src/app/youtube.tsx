@@ -1,0 +1,367 @@
+import Ionicons from '@expo/vector-icons/Ionicons';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useEffect, useRef, useState } from 'react';
+import {
+  Image,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+
+import { importYouTube, usingMockApi } from '@/api/client';
+import type { PickedVideo, YouTubeImportResponse, YouTubeSource } from '@/api/types';
+import { parseYouTubeUrl, youtubeThumbnail } from '@/api/youtube';
+import { PrimaryButton } from '@/components/primary-button';
+import { useSession } from '@/state/session';
+import { colors, radius } from '@/theme';
+
+type Uploaded = { video: PickedVideo; result: YouTubeImportResponse };
+
+/**
+ * Paste a YouTube Short (or video) link and upload it. The backend downloads it,
+ * extracts the dancer's keypoints and saves them with motion features to Supabase.
+ *   ?from=home      shows what was saved, then offers to practice it
+ *   ?from=practice  sets it as the reference and returns to Practice
+ */
+export default function UploadDanceScreen() {
+  const router = useRouter();
+  const { from } = useLocalSearchParams<{ from?: string }>();
+  const fromHome = from === 'home';
+  const { setReference } = useSession();
+
+  const [link, setLink] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const [uploaded, setUploaded] = useState<Uploaded | null>(null);
+  const alive = useRef(true);
+
+  useEffect(() => () => void (alive.current = false), []);
+
+  // The backend downloads and runs pose extraction before answering; show how long it's been.
+  useEffect(() => {
+    if (!busy) return;
+    const started = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [busy]);
+
+  const parsed = parseYouTubeUrl(link);
+  const valid = 'videoId' in parsed;
+  const kind = valid && parsed.isShort ? 'YouTube Short' : 'YouTube video';
+
+  function practice(video: PickedVideo) {
+    setReference(video);
+    router.back();
+    router.navigate('/practice');
+  }
+
+  async function onUpload() {
+    if (!valid || busy) return;
+    setError(null);
+    const url = `https://www.youtube.com/watch?v=${parsed.videoId}`;
+    const base = { url, videoId: parsed.videoId, isShort: parsed.isShort };
+
+    if (usingMockApi) {
+      if (fromHome) {
+        setError('Uploading needs the backend. Set EXPO_PUBLIC_API_URL in frontend/.env and restart Expo.');
+        return;
+      }
+      // Practice can still be clicked through without a backend; nothing is downloaded.
+      practice(toVideo({ ...base, title: kind, serverFilename: null }, null));
+      return;
+    }
+
+    setBusy(true);
+    setElapsed(0);
+    try {
+      const result = await importYouTube(url);
+      if (!alive.current) return;
+      if (!result.persisted) throw new Error("The backend couldn't save that video.");
+      const video = toVideo(
+        {
+          ...base,
+          title: result.filename.replace(/\.[^.]+$/, ''),
+          serverFilename: result.filename,
+          poseWarning: result.status === 'failed' ? (result.pose_error ?? 'Pose extraction failed.') : undefined,
+        },
+        result.metadata.duration_seconds * 1000,
+      );
+      if (fromHome) setUploaded({ video, result });
+      else practice(video);
+    } catch (e) {
+      if (alive.current) setError(e instanceof Error ? e.message : 'Something went wrong.');
+    } finally {
+      if (alive.current) setBusy(false);
+    }
+  }
+
+  const close = busy ? undefined : () => router.back();
+
+  return (
+    <Overlay title={uploaded ? undefined : 'Upload a dance'} onClose={close}>
+      {uploaded ? (
+        <UploadedView
+          uploaded={uploaded}
+          onPractice={() => practice(uploaded.video)}
+          onAnother={() => {
+            setUploaded(null);
+            setLink('');
+          }}
+          onDone={() => router.back()}
+        />
+      ) : (
+        <>
+          <Text style={styles.lead}>Paste a link to a YouTube Short of the dance you want to learn.</Text>
+
+          <View style={[styles.field, !!link && !valid && parsed.error ? styles.fieldError : null]}>
+            <Ionicons name="logo-youtube" size={20} color={colors.muted} />
+            <TextInput
+              value={link}
+              onChangeText={(text) => {
+                setLink(text);
+                setError(null);
+              }}
+              placeholder="youtube.com/shorts/…"
+              placeholderTextColor={colors.muted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              textContentType="URL"
+              returnKeyType="go"
+              onSubmitEditing={onUpload}
+              editable={!busy}
+              style={styles.input}
+            />
+          </View>
+          {!valid && !!parsed.error && <Text style={styles.error}>{parsed.error}</Text>}
+
+          {valid && (
+            <View style={styles.preview}>
+              <Image source={{ uri: youtubeThumbnail(parsed.videoId) }} style={styles.thumbnail} resizeMode="cover" />
+              <View style={styles.badge}>
+                <Ionicons name="logo-youtube" size={14} color={colors.onPrimary} />
+                <Text style={styles.badgeText}>{kind}</Text>
+              </View>
+            </View>
+          )}
+
+          {error && <Text style={styles.error}>{error}</Text>}
+
+          <View style={styles.uploadIcon}>
+            <Ionicons name="cloud-upload-outline" size={36} color={valid ? colors.text : colors.border} />
+          </View>
+          <PrimaryButton label={busy ? 'Uploading…' : 'Upload'} onPress={onUpload} disabled={!valid} loading={busy} arrow={false} />
+
+          {busy && (
+            <Text style={styles.note}>
+              Downloading the dance, mapping the dancer's movements and saving them. This usually takes under a
+              minute ({formatClock(elapsed)} so far).
+            </Text>
+          )}
+          {usingMockApi && !fromHome && (
+            <Text style={styles.note}>Mock mode: the link is kept but not downloaded.</Text>
+          )}
+        </>
+      )}
+    </Overlay>
+  );
+}
+
+/** Dimmed backdrop with a centered card, so the screen underneath stays visible. */
+function Overlay({ title, onClose, children }: { title?: string; onClose?: () => void; children: React.ReactNode }) {
+  return (
+    <KeyboardAvoidingView style={styles.backdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
+      <View style={styles.card}>
+        <View style={styles.cardHeader}>
+          <Text style={styles.cardTitle}>{title ?? ''}</Text>
+          <Pressable
+            onPress={onClose}
+            disabled={!onClose}
+            hitSlop={12}
+            accessibilityLabel="Close"
+            style={!onClose && styles.disabled}
+          >
+            <Ionicons name="close" size={24} color={colors.text} />
+          </Pressable>
+        </View>
+        <ScrollView contentContainerStyle={styles.cardBody} keyboardShouldPersistTaps="handled" bounces={false}>
+          {children}
+        </ScrollView>
+      </View>
+    </KeyboardAvoidingView>
+  );
+}
+
+function UploadedView({
+  uploaded: { video, result },
+  onPractice,
+  onAnother,
+  onDone,
+}: {
+  uploaded: Uploaded;
+  onPractice: () => void;
+  onAnother: () => void;
+  onDone: () => void;
+}) {
+  const saved = result.supabase_status === 'saved';
+  const yt = video.youtube!;
+  return (
+    <>
+      <View style={styles.successHeader}>
+        <View style={[styles.successIcon, !saved && styles.warnIcon]}>
+          <Ionicons name={saved ? 'checkmark' : 'alert'} size={28} color={colors.onPrimary} />
+        </View>
+        <Text style={styles.successTitle}>{saved ? 'Dance uploaded' : 'Uploaded, not saved to Supabase'}</Text>
+      </View>
+
+      <View style={styles.preview}>
+        <Image source={{ uri: youtubeThumbnail(yt.videoId) }} style={styles.thumbnail} resizeMode="cover" />
+      </View>
+      <Text style={styles.videoTitle} numberOfLines={2}>
+        {yt.title}
+      </Text>
+
+      <View style={styles.stats}>
+        <Stat label="Length" value={video.durationMs ? formatClock(Math.round(video.durationMs / 1000)) : '–'} />
+        <Stat label="Frames saved" value={result.frames_saved != null ? String(result.frames_saved) : '0'} />
+        <Stat label="Supabase" value={saved ? 'Saved' : 'Not saved'} />
+      </View>
+
+      {saved ? (
+        <Text style={styles.note}>
+          Keypoints for every frame, joint angles and movement speed are stored in Supabase.
+        </Text>
+      ) : (
+        <Text style={styles.warning}>{result.supabase_error ?? result.pose_error ?? 'Supabase save failed.'}</Text>
+      )}
+
+      <PrimaryButton label="Practice this dance" onPress={onPractice} />
+      <View style={styles.secondaryRow}>
+        <Pressable onPress={onAnother} hitSlop={8}>
+          <Text style={styles.link}>Upload another</Text>
+        </Pressable>
+        <Pressable onPress={onDone} hitSlop={8}>
+          <Text style={styles.link}>Done</Text>
+        </Pressable>
+      </View>
+    </>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.stat}>
+      <Text style={styles.statValue}>{value}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function toVideo(youtube: YouTubeSource, durationMs: number | null): PickedVideo {
+  return {
+    uri: youtubeThumbnail(youtube.videoId),
+    fileName: youtube.serverFilename ?? `${youtube.videoId}.mp4`,
+    mimeType: 'video/mp4',
+    durationMs,
+    youtube,
+  };
+}
+
+function formatClock(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+const styles = StyleSheet.create({
+  backdrop: {
+    flex: 1,
+    justifyContent: 'center',
+    padding: 20,
+    backgroundColor: 'rgba(20, 18, 16, 0.45)',
+  },
+  card: {
+    maxHeight: '88%',
+    borderRadius: 24,
+    backgroundColor: colors.background,
+    paddingTop: 18,
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 12,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 22,
+  },
+  cardTitle: { color: colors.text, fontSize: 20, fontWeight: '700' },
+  cardBody: { padding: 22, paddingTop: 14, gap: 14 },
+  disabled: { opacity: 0.3 },
+  uploadIcon: { alignItems: 'center', marginTop: 10 },
+  lead: { color: colors.muted, fontSize: 15, lineHeight: 22 },
+  field: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    height: 54,
+    paddingHorizontal: 16,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  fieldError: { borderColor: colors.bad },
+  input: { flex: 1, height: '100%', color: colors.text, fontSize: 16 },
+  preview: { borderRadius: radius.md, overflow: 'hidden', backgroundColor: colors.primary },
+  thumbnail: { width: '100%', aspectRatio: 16 / 9 },
+  badge: {
+    position: 'absolute',
+    left: 10,
+    bottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: radius.pill,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+  },
+  badgeText: { color: colors.onPrimary, fontSize: 13, fontWeight: '600' },
+  error: { color: colors.bad, fontSize: 14, lineHeight: 20 },
+  warning: { color: colors.okay, fontSize: 14, lineHeight: 20 },
+  note: { color: colors.muted, fontSize: 13, lineHeight: 19, textAlign: 'center' },
+
+  successHeader: { alignItems: 'center', gap: 10, marginTop: 8 },
+  successIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: colors.good,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  warnIcon: { backgroundColor: colors.okay },
+  successTitle: { color: colors.text, fontSize: 22, fontWeight: '700', textAlign: 'center' },
+  videoTitle: { color: colors.text, fontSize: 16, fontWeight: '600' },
+  stats: { flexDirection: 'row', gap: 10 },
+  stat: {
+    flex: 1,
+    alignItems: 'center',
+    gap: 2,
+    paddingVertical: 12,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+  },
+  statValue: { color: colors.text, fontSize: 18, fontWeight: '700' },
+  statLabel: { color: colors.muted, fontSize: 12 },
+  secondaryRow: { flexDirection: 'row', justifyContent: 'space-around', paddingTop: 4 },
+  link: { color: colors.accent, fontSize: 15, fontWeight: '600' },
+});
