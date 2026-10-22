@@ -1,14 +1,12 @@
-"""Velocity features: how fast joints move between consecutive frames.
+"""
+Calculates how fast joints move between frames.
 
-- `<angle>_velocity`: change in each joint angle per second (degrees/s).
-  Positive means the joint is opening (straightening), negative closing.
-- `<joint>_speed`: how fast a keypoint moves in MediaPipe's 3D world
-  coordinates (meters/s). World coordinates are centred on the hips, so this is
-  speed relative to the body, not travel across the room.
+- <angle>_velocity: Angle change in degrees/s.
+  Positive = straightening, negative = bending.
+- <joint>_speed: Joint movement relative to hips (m/s).
 
-Each value compares a frame with the frame just before it. It is missing (None,
-with a reason) when the frame has no pose, for the first frame, when either frame lacks the value, or when
-the timestamps don't increase. Missing values are never written as 0.
+Returns None instead of 0 if data is missing,
+timestamps are invalid, or there arent enough earlier frames yet.
 """
 
 import math
@@ -27,6 +25,8 @@ class SpeedFeature:
 SPEED_FEATURES = [SpeedFeature(f"{j}_speed", j) for j in
                   ("left_wrist", "right_wrist", "left_ankle", "right_ankle")]
 ANGLE_VELOCITY_UNITS = "degrees/s"
+
+FRAME_GAP = 4
 
 
 def _missing(row, reason):
@@ -51,8 +51,14 @@ def velocity_rows(frames, angle_rows):
     """Velocity rows for all frames. `angle_rows` are the rows from angles.py."""
     angle_value = {(r["frame_index"], r["feature"]): r["value"] for r in angle_rows}
     rows = []
-    previous = None
+    history = []
     for frame in frames:
+
+        if len(history) >= FRAME_GAP:
+            previous = history[-FRAME_GAP]
+        else:
+            previous = None
+
         dt = None if previous is None else (frame.timestamp_ms - previous.timestamp_ms) / 1000
 
         for feature in FEATURES:
@@ -95,5 +101,5 @@ def velocity_rows(frames, angle_rows):
             row["status"] = "ok"
             rows.append(row)
 
-        previous = frame
+        history.append(frame)
     return rows

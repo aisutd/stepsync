@@ -8,7 +8,10 @@ from test_features import BENT_ARM, OUTPUT, STRAIGHT_ARM, row, write_pose_csv
 
 
 @pytest.fixture
-def moving(tmp_path):
+def moving(tmp_path, monkeypatch):
+    
+    monkeypatch.setattr("features.velocity.FRAME_GAP",1)
+    
     path = write_pose_csv(tmp_path / "pose.csv", [
         (0, 0, "OK", STRAIGHT_ARM),
         (1, 500, "OK", BENT_ARM),     # elbow 180 -> 90 degrees in 0.5 s
