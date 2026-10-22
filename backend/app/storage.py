@@ -1,4 +1,4 @@
-"""Save validated MP4s without replacing existing Downloads files."""
+"""Save validated MP4s without replacing existing files."""
 
 import logging
 import re
@@ -43,5 +43,5 @@ def save_video(source: Path, title: str, directory: Path) -> Path:
                 target.unlink(missing_ok=True)
                 raise
     except OSError:
-        logger.exception("Could not save validated MP4 to Downloads")
-        raise VideoError("save_failed", "Could not save the MP4 to Downloads. Check folder permissions and available disk space.", 500)
+        logger.exception("Could not save validated MP4 to %s", directory)
+        raise VideoError("save_failed", "Could not save the MP4. Check folder permissions and available disk space.", 500)

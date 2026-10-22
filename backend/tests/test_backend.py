@@ -19,7 +19,7 @@ def upload(content, name="sample.mp4", settings=None):
         path.write_bytes(content)
         from app.youtube import DownloadedVideo
         return DownloadedVideo(path, "Sample video")
-    with patch("app.main.download_video", download), TestClient(create_app(settings or Settings())) as client:
+    with patch("app.main.download_video", download), TestClient(create_app(settings or Settings.from_env())) as client:
         return client.post("/reference-videos", json={"url": "https://youtu.be/jNQXAC9IVRw"})
 
 
@@ -27,11 +27,13 @@ def test_valid_youtube_intake(video):
     response = upload(video.read_bytes())
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "uploaded"
+    assert body["status"] == "completed"
     assert body["persisted"] is True
     from pathlib import Path
     assert Path(body["saved_path"]).read_bytes() == video.read_bytes()
-    assert body["pose_processing"] == "not_connected"
+    assert body["pose_processing"] == "completed"
+    assert Path(body["pose_preview_path"]).is_file()
+    assert Path(body["pose_data_path"]).is_file()
     assert body["metadata"]["frame_count"] == 20
     assert body["size_bytes"] == video.stat().st_size
     assert body["source_url"] == "https://www.youtube.com/watch?v=jNQXAC9IVRw"
