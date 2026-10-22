@@ -1,7 +1,7 @@
 """Save and load feature documents by video ID.
 
-Local JSON files for now. When the database exists, `to_db_rows` gives one flat
-record per (frame, feature) that maps directly onto a table (see README.md).
+Local JSON/CSV files. `to_db_rows` gives one flat record per (frame, feature)
+for the Supabase `pose_features` table (see supabase_store.py).
 """
 
 import csv
@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 
 REQUIRED_ROW_FIELDS = {"frame_index", "timestamp_ms", "feature", "value", "units", "status"}
+DB_FIELDS = ["video_id", "frame_index", "timestamp_ms", "frame_status", "feature",
+             "value", "units", "status", "missing_reason"]
 CSV_FIELDS = ["video_id", "frame_index", "timestamp_ms", "frame_status", "feature",
               "value", "units", "status", "missing_reason"]
 

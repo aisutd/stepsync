@@ -87,7 +87,8 @@ def test_absent_joint_reports_which(synthetic):
 
 def test_timestamps_and_units_carried_through(synthetic):
     assert row(synthetic, 1, "left_elbow_angle")["timestamp_ms"] == 33
-    assert {r["units"] for r in synthetic["rows"]} == {"degrees"}
+    assert {r["units"] for r in synthetic["rows"]} == {"degrees", "degrees/s", "m/s"}
+    assert {r["units"] for r in synthetic["rows"] if r["feature"].endswith("_angle")} == {"degrees"}
 
 
 # Kaitlyn's real outputs.
@@ -97,7 +98,7 @@ def test_real_reze_file():
     assert len(frames) == 616
     assert sum(f.frame_status == "NO_POSE" for f in frames) == 129
     doc = compute_features("reze", frames)
-    values = [r["value"] for r in doc["rows"] if r["status"] == "ok"]
+    values = [r["value"] for r in doc["rows"] if r["status"] == "ok" and r["units"] == "degrees"]
     assert values
     assert all(0 <= v <= 180 for v in values)
 

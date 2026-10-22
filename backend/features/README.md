@@ -10,7 +10,8 @@ From `stepsync/backend`:
 
 ```powershell
 python -m features output/reze_pose_data.csv --video-id reze --csv --frame 0 --frame 150
-python -m pytest tests/test_features.py -q
+python -m features output/reze_pose_data.csv --video-id reze --supabase
+python -m pytest tests/test_features.py tests/test_velocity.py -q
 ```
 
 The first command writes `output/features/reze_features.json`, plus a `.csv`
@@ -29,6 +30,18 @@ skeleton preview video as a manual check.
 180° means the limb is straight. Angles use MediaPipe's 3D **world**
 coordinates (`world_x/y/z`, in meters), so they don't depend on video size and
 they include depth.
+
+## Velocity features
+
+`features/velocity.py` compares each frame with the one before it:
+
+| Feature | Units | Meaning |
+|---|---|---|
+| `left/right_elbow/knee/shoulder/hip_velocity` | degrees/s | How fast each joint angle changes. Positive = opening (straightening), negative = closing |
+| `left/right_wrist_speed`, `left/right_ankle_speed` | m/s | How fast the keypoint moves in MediaPipe world coordinates (hip-centred, so relative to the body) |
+
+A velocity is missing when the frame has no pose, on the first frame, or when
+the value is missing in this or the previous frame.
 
 ## Missing values
 
@@ -60,6 +73,20 @@ can have a few unreliable joints, since that status only needs 75% of the core j
             "status": "ok", "missing_reason": null}]
 }
 ```
+
+## Supabase
+
+Rows are stored in the `pose_features` table in Supabase (one row per frame
+per feature). `select * from pose_features_wide where video_id = 'reze'` shows
+one row per frame with one column per feature.
+
+1. In the Supabase SQL editor, run `features/schema_postgres.sql` once.
+2. Set `SUPABASE_URL` and `SUPABASE_KEY` (environment variables, never committed).
+3. `python -m features <pose csv> --video-id <id> --supabase` replaces that
+   video's rows; `load_features_supabase(video_id)` reads them back.
+
+`video_id` is text for now. It should become the team's video ID (uuid
+referencing the videos table) once that table exists.
 
 ## Proposed database table (to confirm with Satwik and Aronno)
 

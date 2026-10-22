@@ -13,7 +13,7 @@ no coordinates. Missing values are never written as 0.
 import math
 from dataclasses import dataclass
 
-FEATURE_SET_VERSION = 1
+FEATURE_SET_VERSION = 2  # 2: added velocity features
 
 
 @dataclass(frozen=True)
@@ -98,9 +98,13 @@ def frame_feature_rows(frame, features=FEATURES):
 
 def compute_features(video_id, frames, source_file=None, features=FEATURES):
     """Build the features document for one video."""
+    from .velocity import SPEED_FEATURES, velocity_rows
+
     rows = []
     for frame in frames:
         rows.extend(frame_feature_rows(frame, features))
+    rows.extend(velocity_rows(frames, rows))
+    rows.sort(key=lambda r: r["frame_index"])  # stable: angles stay first in each frame
     return {
         "schema_version": 1,
         "feature_set_version": FEATURE_SET_VERSION,
@@ -110,6 +114,12 @@ def compute_features(video_id, frames, source_file=None, features=FEATURES):
         "feature_definitions": [
             {"name": f.name, "units": f.units, "joints": [f.a, f.vertex, f.c]}
             for f in features
+        ] + [
+            {"name": f"{f.name.removesuffix('_angle')}_velocity", "units": "degrees/s",
+             "joints": [f.a, f.vertex, f.c]}
+            for f in features
+        ] + [
+            {"name": f.name, "units": f.units, "joints": [f.joint]} for f in SPEED_FEATURES
         ],
         "rows": rows,
     }

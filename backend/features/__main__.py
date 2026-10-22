@@ -2,6 +2,7 @@
 
     python -m features output/reze_pose_data.csv --video-id reze
     python -m features output/reze_pose_data.csv --video-id reze --frame 100
+    python -m features output/reze_pose_data.csv --video-id reze --supabase
 """
 
 import argparse
@@ -19,6 +20,8 @@ def main():
     parser.add_argument("--video-id", required=True, help="ID the features are saved under")
     parser.add_argument("--output-dir", default="output/features")
     parser.add_argument("--csv", action="store_true", help="Also write a CSV copy")
+    parser.add_argument("--supabase", action="store_true",
+                        help="Also write the rows to Supabase (needs SUPABASE_URL and SUPABASE_KEY)")
     parser.add_argument("--frame", type=int, action="append",
                         help="Print this frame's angles for a manual check (repeatable)")
     args = parser.parse_args()
@@ -33,6 +36,9 @@ def main():
     print(f"Saved: {path}")
     if args.csv:
         print(f"CSV:   {save_features_csv(doc, path.with_suffix('.csv'))}")
+    if args.supabase:
+        from .supabase_store import save_features_supabase
+        print(f"Supabase: {save_features_supabase(doc)} rows in pose_features")
 
     for frame_index in args.frame or []:
         rows = [r for r in doc["rows"] if r["frame_index"] == frame_index]
