@@ -1,4 +1,26 @@
-# Local YouTube video backend (Rodrigo)
+# Local YouTube intake and pose processing
+
+From the project root, start the backend with:
+
+```powershell
+.\run-local.ps1
+```
+
+Use `powershell -ExecutionPolicy Bypass -File .\run-local.ps1` if script execution
+is blocked, or `.\run-local.ps1 -Port 8001` to use another port.
+The launcher uses `backend/venv`, adds project-local FFmpeg and Deno to PATH
+when present, and defaults storage to `.local-tools/data`.
+
+To allow a five-minute video, set limits before starting (restart a running server):
+
+```powershell
+$env:STEPSYNC_MAX_DURATION_SECONDS = "300"
+$env:STEPSYNC_POSE_PROCESSING_TIMEOUT_SECONDS = "1200"
+.\run-local.ps1
+```
+
+The 100 MB size limit still applies. Larger values can be set with
+`STEPSYNC_MAX_UPLOAD_BYTES`. Longer videos take more time and disk space.
 
 Run from `stepsync/backend` in PowerShell, using the existing Python 3.12 venv:
 
@@ -22,9 +44,13 @@ are rejected, even on a watch URL. Confirm HTTP 200, nonzero metadata,
 `source_url`, a sanitized title-based `filename`, and an absolute `saved_path`. Also try an invalid URL and a public
 video longer than 60 seconds (expect `invalid_url` and `video_too_long`).
 No token is needed in this local phase. A valid clip returns HTTP 200 with
-metadata, `status: uploaded`, `pose_processing: not_connected`, and
-`persisted: true`. The validated MP4 is saved to `C:\Users\rodri\Downloads`.
-The response includes its full `saved_path`. Invalid Windows filename characters
+metadata, `status: completed`, `pose_processing: completed`, and
+`persisted: true`. The validated MP4 is saved under the configured data directory.
+The response includes `saved_path`, `pose_preview_path`, and `pose_data_path`.
+If extraction fails, HTTP 200 instead contains `status: failed`,
+`pose_processing: failed`, `pose_error_code`, and `pose_error`; the saved source
+remains available for retry. Check these fields as well as the HTTP status.
+Invalid Windows filename characters
 are replaced, reserved device names are escaped, and long names are shortened.
 Repeated titles use numbered suffixes such as `Title (1).mp4` without overwriting.
 Temporary downloads are deleted before the response returns.
@@ -53,6 +79,16 @@ There is no dotenv loader or additional settings framework.
 | `STEPSYNC_TARGET_FPS` | `30` | Sampling target; slower sources are not duplicated |
 | `STEPSYNC_MAX_FRAME_WIDTH` | `1280` | Prepared-frame width ceiling |
 | `STEPSYNC_MAX_FRAME_HEIGHT` | `720` | Prepared-frame height ceiling |
+| `STEPSYNC_DATA_DIRECTORY` | Per-user application data directory | Root for saved sources and pose outputs |
+| `STEPSYNC_POSE_MODEL_PATH` | `backend/models/pose_landmarker_full.task` | MediaPipe model |
+| `STEPSYNC_POSE_PROCESSING_TIMEOUT_SECONDS` | `600` | Maximum seconds for one pose extraction |
+
+When using `run-local.ps1`, the default data root is `.local-tools/data`.
+Direct Uvicorn starts default to `%LOCALAPPDATA%/StepSync` on Windows,
+`~/Library/Application Support/StepSync` on macOS, and
+`$XDG_DATA_HOME/StepSync` (or `~/.local/share/StepSync`) on Linux.
+Sources are stored in `videos`; each video's artifacts are stored under
+`pose-results/<saved-video-name>/`.
 
 Example: `$env:STEPSYNC_TARGET_FPS = "15"`.
 The same bounding box applies to portrait clips: a 1080x1920 frame becomes
@@ -66,14 +102,16 @@ duration and live/upcoming streams are rejected before download. Missing duratio
 is allowed through preflight; the existing OpenCV duration validation still runs.
 yt-dlp prefers H.264 MP4 video plus M4A audio, with MP4 alternatives, and FFmpeg
 merges/remuxes as needed. The resulting `input.mp4` goes directly to the existing
-`validate_video` function. No pose processing or preprocessing code was rewritten.
+`validate_video` function. The source is persisted before the pose CLI is invoked.
+The CLI runs with the server's Python environment, so MediaPipe and OpenCV
+must be installed there. It produces `skeleton_preview.mp4` and `pose_data.csv`.
 
 The configured byte limit applies to individual streams, download progress,
 temporary stream storage, and the final MP4. Checks are best effort: buffers and
 FFmpeg merge output can temporarily exceed it; this is not a disk quota. A whole
 request-owned temporary directory removes temporary MP4, audio, partial, and
 merge files after both success and failure. After validation, only the final MP4
-is copied to Downloads. Failed saves remove partial destination copies and return
+is copied to the configured video directory. Failed saves remove partial destination copies and return
 `save_failed` (500); `persisted: true` is returned only after a successful save. Requests are synchronous; no background queue or
 whole-request timeout was added.
 Extension and MIME claims do not establish readability: OpenCV opens the file
@@ -104,7 +142,16 @@ URL errors include `invalid_url`, `unsupported_url`, and `unsupported_video`
 (422); other yt-dlp failures use `download_failed` (502). Error classification
 uses yt-dlp messages on a best-effort basis; raw errors are logged only.
 
-## Kaitlyn's proposed handoff (not a final team contract)
+## Pose extraction and optional frame preparation
+
+`app.pose_processing.run_pose_extraction` invokes `pose_extraction.py` in a child
+process. Completion requires both nonempty output files. Failure or timeout removes
+partial pose outputs and retains the source. The request waits for processing;
+there is no background queue or polling API.
+
+The pose CLI decodes the persisted source itself, preserving its frame rate and
+resolution. It does not use the optional sampler below: `STEPSYNC_TARGET_FPS`
+and prepared-frame dimensions do not change pose inference inputs.
 
 `app.video.prepared_frames(path, metadata, settings)` yields `PreparedFrame`:
 
@@ -124,25 +171,17 @@ there is no silent `index / fps` fallback. OpenCV timestamp precision and
 variable-frame-rate behavior depend on its backend and need real-clip testing.
 OpenCV preprocessing itself is unchanged; the new intake uses system FFmpeg/ffprobe.
 
-`app.handoff.PoseExtractor` defines a synchronous consumer interface. Its
-placeholder raises `NotImplementedError`; the intake route deliberately does
-not call it. For a future connection, consume `prepared_frames` while the source
-file still exists, before leaving its temporary-file context. Consume the whole
-iterator so end-of-file validation runs, and close it if stopping early.
-
-All four states (`uploaded`, `processing`, `completed`, `failed`) are defined.
-Only `uploaded` is returned on successful validation in this phase; failures use
-HTTP errors. No fake completed pose results or status transitions are generated.
-
-Waiting on Kaitlyn: agreed processor signature, pose output, confidence/missing
-pose fields, preview output. Waiting on Satwik/Aronno: video ID/database contract,
-authentication, private storage and access rules. Waiting on Lucy: feature
-processor and saved-result contract. No teammate functionality is implemented.
+`app.handoff.PoseExtractor` remains a legacy prepared-frame interface. The API
+uses the persisted-file CLI runner instead. Successful requests return
+`completed`; pose failures return `failed` with error fields while retaining the
+saved source. Validation, download, and save failures use HTTP errors.
+Authentication, database state, feature comparison, and background jobs remain
+future work.
 
 ## Windows system dependencies and limitations
 
-FFmpeg was not available on PATH during implementation; no system software was
-installed. Download a Windows build via https://ffmpeg.org/download.html
+The launcher can use local builds under `.local-tools/ffmpeg` and
+`.local-tools/deno`. For a separate installation, download FFmpeg via https://ffmpeg.org/download.html
 (**Windows builds from gyan.dev**, then a release essentials ZIP). Extract it to
 a stable directory such as `C:\Tools\ffmpeg`. Locate the extracted `bin` folder
 containing both `ffmpeg.exe` and `ffprobe.exe`; add that exact folder to your user
@@ -171,14 +210,15 @@ batches, live/upcoming streams, login, or cookie extraction. Network/region
 restrictions, anti-bot checks, and changes at YouTube can prevent downloads;
 keep yt-dlp current with `python -m pip install -U "yt-dlp[default]"`.
 MP4 codec availability still depends on yt-dlp formats and local OpenCV support;
-remuxing does not transcode unsupported codecs. No real download was tested in
-this environment because FFmpeg is missing. The response retains the existing
-state and video metadata, the canonical `source_url`, and adds `saved_path`.
-Saved MP4s remain in Downloads until you delete them.
+remuxing does not transcode unsupported codecs. The response includes video
+metadata, the canonical `source_url`, `saved_path`, and pose artifact paths.
+Saved sources and pose outputs remain in the configured data directory until
+you delete them.
 
 To manually verify persistence, submit the short public video above twice in
-Swagger and confirm both returned `saved_path` files exist in Downloads with
-different filenames. Existing duration and size limits still apply.
+Swagger and confirm both returned `saved_path` files exist with different
+filenames, and each response has existing preview and CSV paths. Existing
+duration and size limits still apply.
 
 ## If localhost connects but documentation hangs
 
@@ -186,8 +226,8 @@ A stale Windows Uvicorn reload process can retain the listening socket after its
 server worker has exited. A new process may report startup while requests still
 reach the old listener. During diagnosis, this happened on port 8000 while the
 same application responded on a clean port; stopping the old StepSync process
-trees and starting one server restored responses. Downloads saving was not the
-cause and no application-code workaround was needed.
+trees and starting one server restored responses. The configured data directory
+is independent of the listening port.
 
 Stop the previous backend with Ctrl+C and wait for shutdown before starting
 another copy. Start from `backend` using the explicit virtualenv Python:
@@ -201,3 +241,19 @@ If it hangs again, inspect `Get-NetTCPConnection -LocalPort 8000 -State Listen`
 and identify that PID's command line before stopping it. Stop only the confirmed
 StepSync Uvicorn process tree, not all Python processes. Running without
 `--reload --reload-dir app` is also supported; restart manually after edits.
+
+
+# Phone app upload (Aronno)
+
+`POST /analyze` takes two multipart video fields, `reference` and `practice`, from the
+Expo app, saves them to `backend/uploads/<session id>/`, and returns a placeholder
+result. Swap `placeholder_result` in `app/main.py` for the real pipeline; the response
+has to match `AnalysisResult` in `frontend/src/api/types.ts`.
+
+On macOS, run it so a phone on the same Wi-Fi can reach it:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```

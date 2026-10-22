@@ -1,4 +1,7 @@
-"""Future teammate boundary; no MediaPipe or features are implemented here."""
+"""Processing states and a legacy interface for optional prepared-frame consumers.
+
+The intake API uses app.pose_processing to run the pose CLI on persisted files.
+"""
 
 from enum import Enum
 from typing import Iterable, Protocol

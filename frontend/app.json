@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "StepSync",
+    "slug": "stepsync",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "stepsync",
+    "userInterfaceStyle": "dark",
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "StepSync uses the camera to film your dancing so it can compare you with the reference.",
+          "microphonePermission": "StepSync records audio so your video can be lined up with the music.",
+          "recordAudioAndroid": true
+        }
+      ],
+      "expo-video",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "StepSync needs access to your videos to analyze your dancing."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

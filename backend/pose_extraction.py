@@ -2,6 +2,7 @@ import cv2
 import csv
 import math
 import argparse
+from collections import deque
 from pathlib import Path
 
 import mediapipe as mp
@@ -15,6 +16,16 @@ from mediapipe.tasks.python import vision
 
 LANDMARK_THRESHOLD = 0.50
 FRAME_OK_THRESHOLD = 0.75
+MIN_POSE_DETECTION_CONFIDENCE = 0.50
+MIN_POSE_PRESENCE_CONFIDENCE = 0.50
+MIN_TRACKING_CONFIDENCE = 0.50
+SMOOTHING_WINDOW_FRAMES = 3
+# Small rapid reversals are a jitter heuristic, not a MediaPipe output flag.
+IMAGE_JITTER_MAX_STEP = 0.03  # Normalized image coordinates.
+TORSO_JITTER_MAX_STEP = 0.10  # Torso lengths.
+JITTER_MIN_STEP = 0.0001
+JITTER_REVERSAL_COSINE = -0.5
+JITTER_MAX_INTERVAL_SECONDS = 0.10
 
 # The 12 major body joints used to decide whether a frame is reliable.
 CORE_LANDMARKS = [
@@ -174,13 +185,70 @@ def normalize_world_pose(pose, world_pose):
     return normalized_coordinates, torso_scale_m
 
 
+class ConditionalJitterSmoother:
+    """Pass reliable points through; average only small rapid direction reversals.
+
+    MediaPipe exposes confidence, not jitter flags. This temporal heuristic can
+    confuse small deliberate reversals with jitter, and needs three raw samples.
+    """
+
+    def __init__(self, window_size=SMOOTHING_WINDOW_FRAMES, max_step=IMAGE_JITTER_MAX_STEP):
+        if isinstance(window_size, bool) or not isinstance(window_size, int) or window_size < 3:
+            raise ValueError("The jitter window must be an integer of at least three.")
+        if not math.isfinite(max_step) or max_step <= JITTER_MIN_STEP:
+            raise ValueError("The jitter step limit must exceed the minimum step.")
+        self.points = deque(maxlen=window_size)
+        self.max_step = max_step
+        self.timestamp = None
+        self.jitter_detected = False
+
+    def reset(self):
+        self.points.clear()
+        self.timestamp = None
+        self.jitter_detected = False
+
+    def update(self, timestamp, point, visibility, presence):
+        if (point is None or len(point) != 3
+                or any(v is None or not math.isfinite(v) for v in (*point, timestamp, visibility, presence))
+                or visibility < LANDMARK_THRESHOLD or presence < LANDMARK_THRESHOLD):
+            self.reset()
+            return None
+        if self.timestamp is not None and (timestamp <= self.timestamp
+                or timestamp - self.timestamp > JITTER_MAX_INTERVAL_SECONDS):
+            self.reset()
+        self.points.append(tuple(point))
+        self.timestamp = timestamp
+        self.jitter_detected = False
+        if len(self.points) >= 3:
+            first, middle, last = list(self.points)[-3:]
+            before = tuple(middle[i] - first[i] for i in range(3))
+            after = tuple(last[i] - middle[i] for i in range(3))
+            before_size = math.hypot(*before)
+            after_size = math.hypot(*after)
+            if (JITTER_MIN_STEP <= before_size <= self.max_step
+                    and JITTER_MIN_STEP <= after_size <= self.max_step):
+                cosine = sum(before[i] * after[i] for i in range(3)) / (before_size * after_size)
+                self.jitter_detected = cosine <= JITTER_REVERSAL_COSINE
+        if self.jitter_detected:
+            return tuple(sum(p[axis] for p in self.points) / len(self.points) for axis in range(3))
+        return tuple(point)
+
+
 def pixel_position(landmark, width, height):
     """Convert normalized MediaPipe coordinates to image pixels."""
     if not valid_landmark(landmark):
         return None
 
-    x = int(round(landmark.x * width))
-    y = int(round(landmark.y * height))
+    return normalized_pixel_position((landmark.x, landmark.y, landmark.z), width, height)
+
+
+def normalized_pixel_position(coordinates, width, height):
+    """Convert a filtered image coordinate to a clamped pixel position."""
+    if coordinates is None:
+        return None
+
+    x = int(round(coordinates[0] * width))
+    y = int(round(coordinates[1] * height))
 
     # Keep drawing coordinates inside the frame.
     x = max(0, min(width - 1, x))
@@ -199,7 +267,7 @@ def write_no_pose_rows(writer, frame_index, timestamp_ms, status):
             0,
             landmark_id,
             name,
-            *([""] * 13),
+            *([""] * 19),
         ])
 
 
@@ -268,9 +336,9 @@ def main(input_video, output_video, output_csv, model_path):
         base_options=base_options,
         running_mode=vision.RunningMode.VIDEO,
         num_poses=1,
-        min_pose_detection_confidence=0.50,
-        min_pose_presence_confidence=0.50,
-        min_tracking_confidence=0.50,
+        min_pose_detection_confidence=MIN_POSE_DETECTION_CONFIDENCE,
+        min_pose_presence_confidence=MIN_POSE_PRESENCE_CONFIDENCE,
+        min_tracking_confidence=MIN_TRACKING_CONFIDENCE,
     )
 
     # -----------------------------
@@ -301,6 +369,12 @@ def main(input_video, output_video, output_csv, model_path):
             "hip_relative_y_norm",
             "hip_relative_z_norm",
             "torso_scale_m",
+            "smooth_x_norm",
+            "smooth_y_norm",
+            "smooth_z_relative",
+            "smooth_hip_relative_x_norm",
+            "smooth_hip_relative_y_norm",
+            "smooth_hip_relative_z_norm",
         ])
 
         with vision.PoseLandmarker.create_from_options(options) as landmarker:
@@ -309,6 +383,8 @@ def main(input_video, output_video, output_csv, model_path):
             total_frames = 0
             no_pose_frames = 0
             low_confidence_frames = 0
+            image_filters = [ConditionalJitterSmoother() for _ in LANDMARK_NAMES]
+            normalized_filters = [ConditionalJitterSmoother(max_step=TORSO_JITTER_MAX_STEP) for _ in LANDMARK_NAMES]
 
             while True:
                 success, frame = cap.read()
@@ -348,6 +424,8 @@ def main(input_video, output_video, output_csv, model_path):
                     no_pose_frames += 1
 
                     frame_status = "NO_POSE"
+                    for point_filter in image_filters + normalized_filters:
+                        point_filter.reset()
 
                     write_no_pose_rows(
                         csv_writer,
@@ -403,6 +481,28 @@ def main(input_video, output_video, output_csv, model_path):
                     pose,
                     world_pose,
                 )
+
+                timestamp_seconds = timestamp_ms / 1000.0
+                smoothed_image_pose = []
+                smoothed_normalized_pose = []
+                for landmark_id, landmark in enumerate(pose):
+                    reliable = landmark_is_reliable(landmark)
+                    if reliable:
+                        smoothed_image_pose.append(image_filters[landmark_id].update(
+                            timestamp_seconds, (landmark.x, landmark.y, landmark.z),
+                            landmark.visibility, landmark.presence))
+                    else:
+                        image_filters[landmark_id].reset()
+                        smoothed_image_pose.append(None)
+                    normalized = (normalized_world_pose[landmark_id]
+                                  if normalized_world_pose is not None and landmark_id < len(normalized_world_pose)
+                                  else None)
+                    if reliable and normalized is not None:
+                        smoothed_normalized_pose.append(normalized_filters[landmark_id].update(
+                            timestamp_seconds, normalized, landmark.visibility, landmark.presence))
+                    else:
+                        normalized_filters[landmark_id].reset()
+                        smoothed_normalized_pose.append(None)
 
                 # ------------------------------------
                 # Save every landmark
@@ -467,6 +567,8 @@ def main(input_video, output_video, output_csv, model_path):
                         hip_relative_y,
                         hip_relative_z,
                         torso_scale_m if torso_scale_m is not None else "",
+                        *(smoothed_image_pose[landmark_id] or ("", "", "")),
+                        *(smoothed_normalized_pose[landmark_id] or ("", "", "")),
                     ])
 
                 # ------------------------------------
@@ -480,17 +582,17 @@ def main(input_video, output_video, output_csv, model_path):
                     if start_idx >= len(pose) or end_idx >= len(pose):
                         continue
 
-                    start = pose[start_idx]
-                    end = pose[end_idx]
+                    start = smoothed_image_pose[start_idx]
+                    end = smoothed_image_pose[end_idx]
 
                     if (
-                        not landmark_is_reliable(start)
-                        or not landmark_is_reliable(end)
+                        start is None
+                        or end is None
                     ):
                         continue
 
-                    p1 = pixel_position(start, width, height)
-                    p2 = pixel_position(end, width, height)
+                    p1 = normalized_pixel_position(start, width, height)
+                    p2 = normalized_pixel_position(end, width, height)
 
                     if p1 is None or p2 is None:
                         continue
@@ -504,12 +606,12 @@ def main(input_video, output_video, output_csv, model_path):
                     )
 
                 # Draw reliable joints.
-                for landmark in pose:
+                for landmark in smoothed_image_pose:
 
-                    if not landmark_is_reliable(landmark):
+                    if landmark is None:
                         continue
 
-                    position = pixel_position(
+                    position = normalized_pixel_position(
                         landmark,
                         width,
                         height,
