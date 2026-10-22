@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import { useState, type ComponentProps } from 'react';
 import {
-  ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -9,17 +10,24 @@ import {
   Text,
   TextInput,
   View,
+  type TextInputProps,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { PrimaryButton } from '@/components/primary-button';
 import { supabase } from '@/lib/supabase';
-import { colors } from '@/theme';
+import { setRememberMe } from '@/state/auth';
+import { colors, radius } from '@/theme';
 
-type Mode = 'signIn' | 'signUp';
+type Mode = 'logIn' | 'signUp';
 
 export default function LoginScreen() {
-  const [mode, setMode] = useState<Mode>('signIn');
+  const insets = useSafeAreaInsets();
+  const [mode, setMode] = useState<Mode>('logIn');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [remember, setRemember] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -35,13 +43,14 @@ export default function LoginScreen() {
 
     setBusy(true);
     try {
+      await setRememberMe(remember);
       if (signingUp) {
         const { data, error } = await supabase.auth.signUp({ email: trimmed, password });
         if (error) throw error;
         // With email confirmation on (the Supabase default) there is no session yet.
         if (!data.session) {
-          setNotice(`Check ${trimmed} for a confirmation link, then sign in here.`);
-          setMode('signIn');
+          setNotice(`Check ${trimmed} for a confirmation link, then log in here.`);
+          setMode('logIn');
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email: trimmed, password });
@@ -55,78 +64,99 @@ export default function LoginScreen() {
     }
   }
 
+  function notReady(feature: string) {
+    setError(null);
+    setNotice(`${feature} isn't set up yet. Use email and password for now.`);
+  }
+
   function switchMode() {
-    setMode(signingUp ? 'signIn' : 'signUp');
+    setMode(signingUp ? 'logIn' : 'signUp');
     setError(null);
     setNotice(null);
   }
 
   return (
-    <KeyboardAvoidingView
-      style={styles.fill}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
-      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-        <View style={styles.brand}>
-          <Text style={styles.logo}>StepSync</Text>
-          <Text style={styles.tagline}>Learn the routine, one step at a time.</Text>
-        </View>
+    <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <ScrollView
+        contentContainerStyle={[styles.container, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 24 }]}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <Image
+          source={require('../../assets/images/login-hero.png')}
+          style={styles.hero}
+          resizeMode="contain"
+          accessibilityLabel="StepSync. Your dance journey starts here."
+        />
 
-        <Text style={styles.heading}>{signingUp ? 'Create an account' : 'Sign in'}</Text>
+        {signingUp && <Text style={styles.heading}>Create your account</Text>}
 
-        <View style={styles.field}>
-          <Text style={styles.label}>Email</Text>
-          <TextInput
-            value={email}
-            onChangeText={setEmail}
-            placeholder="you@example.com"
-            placeholderTextColor={colors.muted}
-            autoCapitalize="none"
-            autoCorrect={false}
-            autoComplete="email"
-            keyboardType="email-address"
-            textContentType="emailAddress"
-            returnKeyType="next"
-            style={styles.input}
-          />
-        </View>
+        <Field
+          icon="person-outline"
+          value={email}
+          onChangeText={setEmail}
+          placeholder="Email"
+          autoCapitalize="none"
+          autoCorrect={false}
+          autoComplete="email"
+          keyboardType="email-address"
+          textContentType="emailAddress"
+          returnKeyType="next"
+        />
+        <Field
+          icon="lock-closed-outline"
+          value={password}
+          onChangeText={setPassword}
+          placeholder="Password"
+          secureTextEntry={!showPassword}
+          autoCapitalize="none"
+          autoComplete={signingUp ? 'new-password' : 'current-password'}
+          textContentType={signingUp ? 'newPassword' : 'password'}
+          returnKeyType="go"
+          onSubmitEditing={onSubmit}
+          trailing={
+            <Pressable
+              onPress={() => setShowPassword((s) => !s)}
+              hitSlop={10}
+              accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+            >
+              <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={colors.muted} />
+            </Pressable>
+          }
+        />
 
-        <View style={styles.field}>
-          <Text style={styles.label}>Password</Text>
-          <TextInput
-            value={password}
-            onChangeText={setPassword}
-            placeholder={signingUp ? 'At least 6 characters' : 'Your password'}
-            placeholderTextColor={colors.muted}
-            secureTextEntry
-            autoCapitalize="none"
-            autoComplete={signingUp ? 'new-password' : 'current-password'}
-            textContentType={signingUp ? 'newPassword' : 'password'}
-            returnKeyType="go"
-            onSubmitEditing={onSubmit}
-            style={styles.input}
-          />
-        </View>
+        {!signingUp && (
+          <View style={styles.options}>
+            <Pressable onPress={() => setRemember((r) => !r)} hitSlop={8} style={styles.remember}>
+              <Ionicons name={remember ? 'checkbox' : 'square-outline'} size={18} color={colors.text} />
+              <Text style={styles.optionText}>Remember me</Text>
+            </Pressable>
+            <Pressable onPress={() => notReady('Password reset')} hitSlop={8}>
+              <Text style={styles.optionText}>Forgot?</Text>
+            </Pressable>
+          </View>
+        )}
 
         {error && <Text style={styles.error}>{error}</Text>}
         {notice && <Text style={styles.notice}>{notice}</Text>}
 
-        <Pressable
-          onPress={onSubmit}
-          disabled={busy}
-          style={({ pressed }) => [styles.button, busy && styles.disabled, pressed && styles.pressed]}
-        >
-          {busy ? (
-            <ActivityIndicator color={colors.text} />
-          ) : (
-            <Text style={styles.buttonText}>{signingUp ? 'Create account' : 'Sign in'}</Text>
-          )}
-        </Pressable>
+        <PrimaryButton label={signingUp ? 'Sign Up' : 'Log In'} onPress={onSubmit} loading={busy} />
 
-        <Pressable onPress={switchMode} disabled={busy} hitSlop={8}>
-          <Text style={styles.switch}>
-            {signingUp ? 'Already have an account? ' : 'New to StepSync? '}
-            <Text style={styles.switchLink}>{signingUp ? 'Sign in' : 'Create one'}</Text>
+        <View style={styles.dividerBlock}>
+          <Text style={styles.continueWith}>or continue with</Text>
+          <View style={styles.divider} />
+        </View>
+
+        <View style={styles.socialRow}>
+          <SocialButton icon="logo-google" label="Google" onPress={() => notReady('Google sign-in')} />
+          <SocialButton icon="logo-apple" label="Apple" onPress={() => notReady('Apple sign-in')} />
+          <SocialButton icon="mail-outline" label="Email link" onPress={() => notReady('Email link sign-in')} />
+        </View>
+
+        <Pressable onPress={switchMode} disabled={busy} hitSlop={8} style={styles.footer}>
+          <Text style={styles.footerText}>
+            {signingUp ? 'Already have an account?  ' : "Don't have an account?  "}
+            <Text style={styles.footerLink}>{signingUp ? 'Log In' : 'Sign Up'}</Text>
           </Text>
         </Pressable>
       </ScrollView>
@@ -134,38 +164,68 @@ export default function LoginScreen() {
   );
 }
 
+type IconName = ComponentProps<typeof Ionicons>['name'];
+
+function Field({ icon, trailing, ...input }: TextInputProps & { icon: IconName; trailing?: React.ReactNode }) {
+  return (
+    <View style={styles.field}>
+      <Ionicons name={icon} size={18} color={colors.muted} />
+      <TextInput {...input} placeholderTextColor={colors.muted} style={styles.input} />
+      {trailing}
+    </View>
+  );
+}
+
+function SocialButton({ icon, label, onPress }: { icon: IconName; label: string; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityLabel={`Continue with ${label}`}
+      style={({ pressed }) => [styles.social, pressed && styles.pressed]}
+    >
+      <Ionicons name={icon} size={22} color={colors.text} />
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: colors.background },
-  container: { flexGrow: 1, justifyContent: 'center', padding: 24, gap: 16 },
-  brand: { alignItems: 'center', gap: 6, marginBottom: 24 },
-  logo: { color: colors.text, fontSize: 36, fontWeight: '800', letterSpacing: -0.5 },
-  tagline: { color: colors.muted, fontSize: 15 },
-  heading: { color: colors.text, fontSize: 22, fontWeight: '700' },
-  field: { gap: 6 },
-  label: { color: colors.muted, fontSize: 14, fontWeight: '500' },
-  input: {
-    height: 50,
-    borderRadius: 12,
+  container: { flexGrow: 1, paddingHorizontal: 24, gap: 14 },
+  hero: { width: '100%', height: 300, marginBottom: 6 },
+  heading: { color: colors.text, fontSize: 22, fontWeight: '700', marginBottom: 2 },
+  field: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    height: 54,
+    paddingHorizontal: 16,
+    borderRadius: radius.sm,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surface,
-    paddingHorizontal: 14,
-    color: colors.text,
-    fontSize: 16,
   },
-  error: { color: colors.bad, fontSize: 14 },
-  notice: { color: colors.good, fontSize: 14, lineHeight: 20 },
-  button: {
+  input: { flex: 1, height: '100%', color: colors.text, fontSize: 16 },
+  options: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  remember: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  optionText: { color: colors.text, fontSize: 14 },
+  error: { color: colors.bad, fontSize: 14, lineHeight: 20 },
+  notice: { color: colors.accent, fontSize: 14, lineHeight: 20 },
+  dividerBlock: { alignItems: 'center', gap: 10, marginTop: 4 },
+  continueWith: { color: colors.muted, fontSize: 14 },
+  divider: { alignSelf: 'stretch', height: 1, backgroundColor: colors.hairline },
+  socialRow: { flexDirection: 'row', justifyContent: 'center', gap: 36, marginTop: 4 },
+  social: {
+    width: 52,
     height: 52,
-    borderRadius: 14,
-    backgroundColor: colors.accent,
+    borderRadius: 26,
+    borderWidth: 1,
+    borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 4,
+    backgroundColor: colors.surface,
   },
-  disabled: { opacity: 0.5 },
-  pressed: { opacity: 0.8 },
-  buttonText: { color: colors.text, fontSize: 17, fontWeight: '600' },
-  switch: { color: colors.muted, textAlign: 'center', fontSize: 15 },
-  switchLink: { color: colors.accent, fontWeight: '600' },
+  pressed: { opacity: 0.7 },
+  footer: { marginTop: 'auto', paddingTop: 24, alignItems: 'center' },
+  footerText: { color: colors.muted, fontSize: 14 },
+  footerLink: { color: colors.text, fontWeight: '600' },
 });

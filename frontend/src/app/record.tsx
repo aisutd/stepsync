@@ -321,10 +321,10 @@ const styles = StyleSheet.create({
     marginTop: 10,
     height: 52,
     borderRadius: 14,
-    backgroundColor: colors.accent,
+    backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  primaryText: { color: colors.text, fontSize: 17, fontWeight: '600' },
+  primaryText: { color: colors.onPrimary, fontSize: 17, fontWeight: '600' },
   cancel: { color: colors.muted, textAlign: 'center', fontSize: 15, padding: 8 },
 });

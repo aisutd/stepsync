@@ -12,7 +12,7 @@ export const supabaseConfigured = Boolean(url && key);
 
 // Placeholders keep the app from crashing before .env is filled in;
 // nothing calls Supabase while supabaseConfigured is false.
-export const supabase = createClient(url ?? 'https://not-configured.supabase.co', key ?? 'not-configured', {
+export const supabase = createClient(url || 'https://not-configured.supabase.co', key || 'not-configured', {
   auth: {
     // Keeps users signed in across app restarts. The browser uses localStorage by default.
     ...(Platform.OS !== 'web' ? { storage: AsyncStorage } : {}),
