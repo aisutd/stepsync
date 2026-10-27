@@ -114,8 +114,9 @@ def test_save_dance_writes_team_tables():
                         "description": "Fast \u00b7 Legs + Arms"}
     assert steps[1]["description"] == "Slow"
     keyframes = fake.posted("keyframes")[0]
-    assert [(k["step_id"], k["frame_order"]) for k in keyframes] == [("step-1", 0), ("step-1", 1), ("step-1", 2),
-                                                                     ("step-2", 0), ("step-2", 1), ("step-2", 2)]
+    # frame_order is 1-based: the team's keyframes_frame_order_check rejects 0.
+    assert [(k["step_id"], k["frame_order"]) for k in keyframes] == [("step-1", 1), ("step-1", 2), ("step-1", 3),
+                                                                     ("step-2", 1), ("step-2", 2), ("step-2", 3)]
     assert [k["pose_data"]["frame_index"] for k in keyframes[:3]] == [0, 20, 40]
     assert "tolerance" not in keyframes[0]  # keeps the team's default
     batches = fake.posted("pose_frames")
@@ -238,3 +239,10 @@ def test_endpoint_without_supabase(tmp_path, video):
     csv.write_text("frame_index,pose_present\n0,0\n")
     response = import_short(tmp_path, None, video, pose_csv=csv)
     assert response.json()["supabase_status"] == "not_configured"
+
+
+def test_error_includes_supabase_reason():
+    body = {"code": "23514", "message": 'new row for relation "keyframes" violates check constraint "keyframes_frame_order_check"'}
+    with pytest.raises(SupabaseError, match="keyframes_frame_order_check"):
+        make_store(FakeSupabase(fail_table="keyframes", fail_status=400, fail_body=body)).save_dance(
+            {"owner_id": "u", "title": "x"}, frames_fixture(90), STEPS)

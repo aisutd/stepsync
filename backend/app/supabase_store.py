@@ -234,7 +234,21 @@ class SupabaseStore:
             hint = " The user has no row in profiles; every account needs one before it can own dances."
         elif response.status_code in (401, 403):
             hint = " Check STEPSYNC_SUPABASE_SECRET_KEY (use the secret/service_role key)."
-        raise SupabaseError(f"Supabase rejected the {table} insert ({response.status_code}).{hint}")
+        raise SupabaseError(f"Supabase rejected the {table} insert ({response.status_code}).{hint}{_reason(response)}")
+
+
+def _reason(response: httpx.Response) -> str:
+    """Supabase's own explanation (e.g. which constraint failed), shortened for the app."""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    # "details" can repeat the whole failing row (all keypoints), so only message and hint.
+    parts = [str(body[k]) for k in ("message", "hint") if body.get(k)]
+    text = " ".join(parts)
+    return f" Supabase says: {text[:300]}" if text else ""
 
 
 INTENSITY_WORDS = {"slow": "Slow", "medium": "Medium", "fast": "Fast"}
@@ -263,10 +277,10 @@ def _keyframe_rows(step_id: str, step: dict, frames: list[dict]) -> list[dict]:
     unique = list({f["frame_index"]: f for f in picks}.values())
     return [{
         "step_id": step_id,
-        "frame_order": order,
+        "frame_order": order,  # 1-based, like steps.step_order (keyframes_frame_order_check)
         "timestamp_ms": f["timestamp_ms"],
         "pose_data": {"frame_index": f["frame_index"], "keypoints": f["keypoints"], "joint_angles": f["joint_angles"]},
-    } for order, f in enumerate(unique)]
+    } for order, f in enumerate(unique, start=1)]
 
 
 def _frame_row(dance_id: str, frame: dict) -> dict:
