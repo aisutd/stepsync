@@ -19,6 +19,19 @@ export type YouTubeSource = {
   serverFilename: string | null;
   /** Set when the video saved but Kaitlyn's pose extraction failed on it. */
   poseWarning?: string;
+  /** Learnable steps the backend found in the dance. */
+  steps?: DanceStep[];
+};
+
+/** One learnable step found by backend/app/segmentation.py. */
+export type DanceStep = {
+  step_index: number;
+  label: string;
+  start_ms: number;
+  end_ms: number;
+  intensity: 'slow' | 'medium' | 'fast';
+  /** Body parts moving more than usual in this step. */
+  focus: ('arms' | 'legs' | 'head' | 'torso')[];
 };
 
 /** Response of POST /reference-videos (Rodrigo's YouTube intake). */
@@ -33,9 +46,10 @@ export type YouTubeImportResponse = {
   pose_error?: string | null;
   /** Whether the keypoints and motion features reached Supabase. */
   supabase_status: 'saved' | 'not_configured' | 'skipped' | 'failed';
-  supabase_video_id?: string | null;
+  supabase_dance_id?: string | null;
   supabase_error?: string | null;
   frames_saved?: number | null;
+  steps?: DanceStep[];
 };
 
 export type StepFeedback = {

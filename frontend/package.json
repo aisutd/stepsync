@@ -4,10 +4,11 @@
   "private": true,
   "main": "expo-router/entry",
   "scripts": {
-    "start": "expo start",
-    "ios": "expo start --ios",
-    "android": "expo start --android",
-    "typecheck": "tsc --noEmit"
+    "start": "node scripts/update-api-ip.js && expo start",
+    "ios": "node scripts/update-api-ip.js && expo start --ios",
+    "android": "node scripts/update-api-ip.js && expo start --android",
+    "typecheck": "tsc --noEmit",
+    "update-ip": "node scripts/update-api-ip.js"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",

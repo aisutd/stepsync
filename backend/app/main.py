@@ -20,6 +20,7 @@ from .pose_processing import PoseArtifacts, run_pose_extraction
 from .video import VideoError, validate_video
 from .youtube import download_video, validate_url
 from .storage import save_video
+from .segmentation import segment_steps
 from .supabase_store import SupabaseError, SupabaseStore, add_motion_features, load_pose_frames
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,15 @@ class YouTubeRequest(BaseModel):
     url: str
 
 
+class StepResponse(BaseModel):
+    step_index: int
+    label: str
+    start_ms: int
+    end_ms: int
+    intensity: str
+    focus: list[str]
+
+
 class UploadResponse(BaseModel):
     status: ProcessingState
     source_url: str
@@ -59,9 +69,11 @@ class UploadResponse(BaseModel):
     pose_error: str | None = None
     # Supabase: "saved", "not_configured", "skipped" (no keypoints) or "failed".
     supabase_status: str = "not_configured"
-    supabase_video_id: str | None = None
+    supabase_dance_id: str | None = None
     supabase_error: str | None = None
     frames_saved: int | None = None
+    # Learnable steps found in the dance (empty when no dancer was detected).
+    steps: list[StepResponse] = []
 
 
 _FROM_ENV = object()
@@ -182,31 +194,45 @@ def create_app(
 
 
 def save_to_supabase(store, data_path: Path, url: str, title: str, saved: Path, metadata, authorization) -> dict:
-    """Store the keypoints and motion features; never fails the import, reports status instead."""
+    """Split the dance into steps and store keypoints, features and steps.
+
+    Never fails the import: Supabase problems are reported in the response instead.
+    """
+    try:
+        frames = load_pose_frames(data_path)
+        add_motion_features(frames)
+        steps = segment_steps(frames)
+    except Exception:
+        logger.exception("Could not read pose data from %s", data_path)
+        return {"supabase_status": "failed", "supabase_error": "Couldn't read the pose data. Check the backend logs."}
+
+    step_info = [{k: step[k] for k in StepResponse.model_fields} for step in steps]
     if store is None:
-        return {"supabase_status": "not_configured", "supabase_error": (
+        return {"steps": step_info, "supabase_status": "not_configured", "supabase_error": (
             "The backend isn't connected to Supabase. Set STEPSYNC_SUPABASE_URL and "
             "STEPSYNC_SUPABASE_SECRET_KEY in backend/.env and restart it."
         )}
     try:
-        frames = load_pose_frames(data_path)
-        summary = add_motion_features(frames)
-        user_id = None
+        owner_id = None
         if authorization and authorization.lower().startswith("bearer "):
-            user_id = store.user_id_for_token(authorization[7:].strip())
-        video = {
-            "user_id": user_id, "source_url": url, "youtube_id": url.rsplit("v=", 1)[-1],
-            "title": title or saved.stem, "filename": saved.name,
-            "duration_seconds": metadata.duration_seconds, "fps": metadata.fps,
-            "width": metadata.width, "height": metadata.height, "frame_count": len(frames), **summary,
+            owner_id = store.user_id_for_token(authorization[7:].strip())
+        if owner_id is None:
+            return {"steps": step_info, "supabase_status": "failed",
+                    "supabase_error": "Log in to save dances to Supabase; every dance needs an owner."}
+        dance = {
+            "owner_id": owner_id, "title": title or saved.stem, "source_url": url,
+            "video_path": saved.name,  # the name /analyze accepts as reference_video
+            "duration_ms": round(metadata.duration_seconds * 1000), "status": "ready",
         }
-        video_id = store.save_reference(video, frames)
-        return {"supabase_status": "saved", "supabase_video_id": video_id, "frames_saved": len(frames)}
+        dance_id = store.save_dance(dance, frames, steps)
+        return {"steps": step_info, "supabase_status": "saved", "supabase_dance_id": dance_id,
+                "frames_saved": len(frames)}
     except SupabaseError as error:
-        return {"supabase_status": "failed", "supabase_error": str(error)}
+        return {"steps": step_info, "supabase_status": "failed", "supabase_error": str(error)}
     except Exception:
-        logger.exception("Could not prepare pose data from %s for Supabase", data_path)
-        return {"supabase_status": "failed", "supabase_error": "Couldn't read the pose data to save it. Check the backend logs."}
+        logger.exception("Saving to Supabase failed")
+        return {"steps": step_info, "supabase_status": "failed",
+                "supabase_error": "Saving to Supabase failed unexpectedly. Check the backend logs."}
 
 
 def find_saved_video(name: str, directory: Path) -> Path:

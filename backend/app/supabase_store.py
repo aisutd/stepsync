@@ -1,10 +1,13 @@
 """Save a reference dance's keypoints and motion features to Supabase.
 
 Reads the pose CSV written by pose_extraction.py (one row per landmark per frame),
-groups it into frames, adds simple motion features, and inserts:
-  dance_videos  one row per imported video (metadata + summary features)
+groups it into frames, adds simple motion features, and writes to the team's tables:
+  dances        one row per uploaded dance (owner = the logged-in user)
+  steps         one row per learnable step found by segmentation.py
+  keyframes     three key poses per step (start, middle, end) for scoring
   pose_frames   one row per frame (all 33 keypoints + per-frame features as JSON)
-The tables are created by supabase/migrations/*_dance_videos.sql.
+pose_frames is created by supabase/migrations/20261027010000_upload_into_dances.sql;
+the other tables belong to the team's schema.
 
 Configuration (backend environment only; the secret key must never ship in the app):
   STEPSYNC_SUPABASE_URL         https://<project>.supabase.co
@@ -172,28 +175,51 @@ class SupabaseStore:
             return None
         return response.json().get("id") if response.status_code == 200 else None
 
-    def save_reference(self, video: dict, frames: list[dict]) -> str:
-        """Insert the video row and its frames; returns the new dance_videos id."""
+    def save_dance(self, dance: dict, frames: list[dict], steps: list[dict]) -> str:
+        """Insert the dance, its steps, keyframes and frames; returns the new dances id.
+
+        If any insert fails, everything written for this dance is removed again.
+        """
         rest = f"{self.config.url}/rest/v1"
+        returning = {**self._headers(), "Prefer": "return=representation"}
         try:
-            response = self.client.post(
-                f"{rest}/dance_videos", json=video,
-                headers={**self._headers(), "Prefer": "return=representation"},
-            )
-            self._check(response, "dance_videos")
-            video_id = response.json()[0]["id"]
+            response = self.client.post(f"{rest}/dances", json=dance, headers=returning)
+            self._check(response, "dances")
+            dance_id = response.json()[0]["id"]
+            step_ids: list[str] = []
             try:
+                if steps:
+                    response = self.client.post(f"{rest}/steps", json=[_step_row(dance_id, s) for s in steps],
+                                                headers=returning)
+                    self._check(response, "steps")
+                    by_order = {row["step_order"]: row["id"] for row in response.json()}
+                    step_ids = list(by_order.values())
+                    keyframes = [row for s in steps for row in _keyframe_rows(by_order[s["step_index"] + 1], s, frames)]
+                    if keyframes:
+                        self._check(self.client.post(f"{rest}/keyframes", json=keyframes, headers=self._headers()),
+                                    "keyframes")
                 for start in range(0, len(frames), FRAME_BATCH):
-                    rows = [_frame_row(video_id, f) for f in frames[start:start + FRAME_BATCH]]
+                    rows = [_frame_row(dance_id, f) for f in frames[start:start + FRAME_BATCH]]
                     self._check(self.client.post(f"{rest}/pose_frames", json=rows, headers=self._headers()), "pose_frames")
             except Exception:
-                # Don't leave a video row without its keypoints.
-                self.client.delete(f"{rest}/dance_videos", params={"id": f"eq.{video_id}"}, headers=self._headers())
+                self._remove(dance_id, step_ids)
                 raise
-            return video_id
+            return dance_id
         except httpx.HTTPError as error:
             logger.exception("Supabase request failed")
             raise SupabaseError("Couldn't reach Supabase. Check STEPSYNC_SUPABASE_URL and the network.") from error
+
+    def _remove(self, dance_id: str, step_ids: list[str]):
+        """Undo a partial save, children first (works whether or not the foreign keys cascade)."""
+        rest, headers = f"{self.config.url}/rest/v1", self._headers()
+        try:
+            if step_ids:
+                self.client.delete(f"{rest}/keyframes", params={"step_id": f"in.({','.join(step_ids)})"}, headers=headers)
+            self.client.delete(f"{rest}/pose_frames", params={"dance_id": f"eq.{dance_id}"}, headers=headers)
+            self.client.delete(f"{rest}/steps", params={"dance_id": f"eq.{dance_id}"}, headers=headers)
+            self.client.delete(f"{rest}/dances", params={"id": f"eq.{dance_id}"}, headers=headers)
+        except httpx.HTTPError:
+            logger.exception("Could not remove partial dance %s", dance_id)
 
     @staticmethod
     def _check(response: httpx.Response, table: str):
@@ -201,16 +227,51 @@ class SupabaseStore:
             return
         logger.error("Supabase insert into %s failed: %s %s", table, response.status_code, response.text[:2000])
         hint = ""
-        if response.status_code == 404 or "does not exist" in response.text or "PGRST205" in response.text:
-            hint = " Run the SQL in backend/supabase/migrations first."
+        if (response.status_code == 404 or "does not exist" in response.text
+                or "PGRST205" in response.text or "PGRST204" in response.text):
+            hint = " Run backend/supabase/migrations/20261027010000_upload_into_dances.sql first."
+        elif "23503" in response.text and table == "dances":
+            hint = " The user has no row in profiles; every account needs one before it can own dances."
         elif response.status_code in (401, 403):
             hint = " Check STEPSYNC_SUPABASE_SECRET_KEY (use the secret/service_role key)."
         raise SupabaseError(f"Supabase rejected the {table} insert ({response.status_code}).{hint}")
 
 
-def _frame_row(video_id: str, frame: dict) -> dict:
+INTENSITY_WORDS = {"slow": "Slow", "medium": "Medium", "fast": "Fast"}
+
+
+def _step_row(dance_id: str, step: dict) -> dict:
+    focus = " + ".join(part.capitalize() for part in step["focus"])
+    description = INTENSITY_WORDS[step["intensity"]] + (f" \u00b7 {focus}" if focus else "")
     return {
-        "video_id": video_id,
+        "dance_id": dance_id,
+        "step_order": step["step_index"] + 1,
+        "name": step["label"],
+        "start_ms": step["start_ms"],
+        "end_ms": step["end_ms"],
+        "description": description,
+    }
+
+
+def _keyframe_rows(step_id: str, step: dict, frames: list[dict]) -> list[dict]:
+    """Three key poses per step: the first, middle and last frames where the dancer is visible."""
+    inside = [f for f in frames
+              if step["start_frame"] <= f["frame_index"] <= step["end_frame"] and f["pose_present"]]
+    if not inside:
+        return []
+    picks = [inside[0], inside[len(inside) // 2], inside[-1]]
+    unique = list({f["frame_index"]: f for f in picks}.values())
+    return [{
+        "step_id": step_id,
+        "frame_order": order,
+        "timestamp_ms": f["timestamp_ms"],
+        "pose_data": {"frame_index": f["frame_index"], "keypoints": f["keypoints"], "joint_angles": f["joint_angles"]},
+    } for order, f in enumerate(unique)]
+
+
+def _frame_row(dance_id: str, frame: dict) -> dict:
+    return {
+        "dance_id": dance_id,
         "frame_index": frame["frame_index"],
         "timestamp_ms": frame["timestamp_ms"],
         "pose_present": frame["pose_present"],
