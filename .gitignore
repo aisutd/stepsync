@@ -1,0 +1,14 @@
+
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+node_modules/
+.expo/
+__pycache__/
+.pytest_cache/
+backend/input/
+backend/output/
+*.mp4
+*.mov
