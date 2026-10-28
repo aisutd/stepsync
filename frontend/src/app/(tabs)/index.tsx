@@ -14,6 +14,7 @@ export default function HomeScreen() {
   const fraction = progress.movesCompleted / progress.movesTotal;
   const goPractice = () => router.push('/practice');
   const goUpload = () => router.push('/youtube?from=home');
+  const openRoutine = (id: string) => router.push(id === 'perfect-night' ? '/steps' : '/practice');
 
   return (
     <ScrollView
@@ -85,7 +86,7 @@ export default function HomeScreen() {
       </Pressable>
 
       {/* Continue */}
-      <Pressable onPress={goPractice} style={({ pressed }) => [styles.card, styles.row, pressed && styles.pressed]}>
+      <Pressable accessibilityRole="button" accessibilityLabel={`Learn ${recent.title}`} onPress={() => openRoutine(recent.id)} style={({ pressed }) => [styles.card, styles.row, pressed && styles.pressed]}>
         <View style={styles.thumb}>
           <Image source={recent.image} style={StyleSheet.absoluteFill} resizeMode="cover" />
           <View style={styles.thumbShade} />
@@ -111,7 +112,7 @@ export default function HomeScreen() {
         {routines.map((routine) => {
           const selected = routine.id === recent.id;
           return (
-            <Pressable key={routine.id} onPress={goPractice} style={styles.routine}>
+            <Pressable key={routine.id} accessibilityRole="button" accessibilityLabel={`Learn ${routine.title}`} onPress={() => openRoutine(routine.id)} style={styles.routine}>
               <View style={[styles.routineImageWrap, selected && styles.routineSelected]}>
                 <Image source={routine.image} style={styles.routineImage} resizeMode="cover" />
               </View>
