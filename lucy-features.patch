@@ -1,0 +1,640 @@
+diff --git a/backend/features/README.md b/backend/features/README.md
+index b292d7b..3ae7786 100644
+--- a/backend/features/README.md
++++ b/backend/features/README.md
+@@ -10,7 +10,9 @@ From `stepsync/backend`:
+ 
+ ```powershell
+ python -m features output/reze_pose_data.csv --video-id reze --csv --frame 0 --frame 150
+-python -m pytest tests/test_features.py -q
++python -m features output/reze_pose_data.csv --video-id reze --db output/stepsync.db
++python -m features output/reze_pose_data.csv --video-id reze --supabase
++python -m pytest tests/test_features.py tests/test_db.py tests/test_velocity.py -q
+ ```
+ 
+ The first command writes `output/features/reze_features.json`, plus a `.csv`
+@@ -30,6 +32,18 @@ skeleton preview video as a manual check.
+ coordinates (`world_x/y/z`, in meters), so they don't depend on video size and
+ they include depth.
+ 
++## Velocity features
++
++`features/velocity.py` compares each frame with the one before it:
++
++| Feature | Units | Meaning |
++|---|---|---|
++| `left/right_elbow/knee/shoulder/hip_velocity` | degrees/s | How fast each joint angle changes. Positive = opening (straightening), negative = closing |
++| `left/right_wrist_speed`, `left/right_ankle_speed` | m/s | How fast the keypoint moves in MediaPipe world coordinates (hip-centred, so relative to the body) |
++
++A velocity is missing when the frame has no pose, on the first frame, or when
++the value is missing in this or the previous frame.
++
+ ## Missing values
+ 
+ A value is `null`, never 0, and carries a `missing_reason`:
+@@ -61,6 +75,28 @@ can have a few unreliable joints, since that status only needs 75% of the core j
+ }
+ ```
+ 
++## Table storage
++
++`--db <file>` also writes the rows into the `pose_features` table of a SQLite
++file (`features/db.py`, standard library only). Re-running a video replaces
++only that video's rows. The `pose_features_wide` view shows one row per frame
++with one column per angle. `features/schema_postgres.sql` is the same table and
++view for Supabase/Postgres.
++
++```sql
++select * from pose_features_wide where video_id = 'reze' limit 5;
++```
++
++## Supabase
++
++1. In the Supabase SQL editor, run `features/schema_postgres.sql` once.
++2. Set `SUPABASE_URL` and `SUPABASE_KEY` (environment variables, never committed).
++3. `python -m features <pose csv> --video-id <id> --supabase` replaces that
++   video's rows; `load_features_supabase(video_id)` reads them back.
++
++`video_id` is text for now. It should become the team's video ID (uuid
++referencing the videos table) once that table exists.
++
+ ## Proposed database table (to confirm with Satwik and Aronno)
+ 
+ `to_db_rows()` returns exactly these fields:
+diff --git a/backend/features/__init__.py b/backend/features/__init__.py
+index 75ab685..d570b28 100644
+--- a/backend/features/__init__.py
++++ b/backend/features/__init__.py
+@@ -1,5 +1,6 @@
+ """Joint-angle feature extraction and storage (Lucy)."""
+ 
++from .db import load_features_db, save_features_db
+ from .angles import FEATURES, angle_degrees, compute_features
+ from .pose_csv import read_pose_csv
+ from .store import load_features, save_features, save_features_csv, to_db_rows
+diff --git a/backend/features/__main__.py b/backend/features/__main__.py
+index dedd26b..8d4d53f 100644
+--- a/backend/features/__main__.py
++++ b/backend/features/__main__.py
+@@ -2,6 +2,8 @@
+ 
+     python -m features output/reze_pose_data.csv --video-id reze
+     python -m features output/reze_pose_data.csv --video-id reze --frame 100
++    python -m features output/reze_pose_data.csv --video-id reze --db output/stepsync.db
++    python -m features output/reze_pose_data.csv --video-id reze --supabase
+ """
+ 
+ import argparse
+@@ -9,6 +11,7 @@ from pathlib import Path
+ 
+ from .angles import compute_features
+ from .pose_csv import read_pose_csv
++from .db import save_features_db
+ from .store import save_features, save_features_csv
+ 
+ 
+@@ -19,6 +22,10 @@ def main():
+     parser.add_argument("--video-id", required=True, help="ID the features are saved under")
+     parser.add_argument("--output-dir", default="output/features")
+     parser.add_argument("--csv", action="store_true", help="Also write a CSV copy")
++    parser.add_argument("--db", help="Also write the rows into the pose_features table "
++                                     "of this SQLite file")
++    parser.add_argument("--supabase", action="store_true",
++                        help="Also write the rows to Supabase (needs SUPABASE_URL and SUPABASE_KEY)")
+     parser.add_argument("--frame", type=int, action="append",
+                         help="Print this frame's angles for a manual check (repeatable)")
+     args = parser.parse_args()
+@@ -33,6 +40,11 @@ def main():
+     print(f"Saved: {path}")
+     if args.csv:
+         print(f"CSV:   {save_features_csv(doc, path.with_suffix('.csv'))}")
++    if args.db:
++        print(f"Table: {save_features_db(doc, args.db)} rows in pose_features ({args.db})")
++    if args.supabase:
++        from .supabase_store import save_features_supabase
++        print(f"Supabase: {save_features_supabase(doc)} rows in pose_features")
+ 
+     for frame_index in args.frame or []:
+         rows = [r for r in doc["rows"] if r["frame_index"] == frame_index]
+diff --git a/backend/features/angles.py b/backend/features/angles.py
+index b67d2fc..b13ed83 100644
+--- a/backend/features/angles.py
++++ b/backend/features/angles.py
+@@ -13,7 +13,7 @@ no coordinates. Missing values are never written as 0.
+ import math
+ from dataclasses import dataclass
+ 
+-FEATURE_SET_VERSION = 1
++FEATURE_SET_VERSION = 2  # 2: added velocity features
+ 
+ 
+ @dataclass(frozen=True)
+@@ -98,9 +98,13 @@ def frame_feature_rows(frame, features=FEATURES):
+ 
+ def compute_features(video_id, frames, source_file=None, features=FEATURES):
+     """Build the features document for one video."""
++    from .velocity import SPEED_FEATURES, velocity_rows
++
+     rows = []
+     for frame in frames:
+         rows.extend(frame_feature_rows(frame, features))
++    rows.extend(velocity_rows(frames, rows))
++    rows.sort(key=lambda r: r["frame_index"])  # stable: angles stay first in each frame
+     return {
+         "schema_version": 1,
+         "feature_set_version": FEATURE_SET_VERSION,
+@@ -110,6 +114,12 @@ def compute_features(video_id, frames, source_file=None, features=FEATURES):
+         "feature_definitions": [
+             {"name": f.name, "units": f.units, "joints": [f.a, f.vertex, f.c]}
+             for f in features
++        ] + [
++            {"name": f"{f.name.removesuffix('_angle')}_velocity", "units": "degrees/s",
++             "joints": [f.a, f.vertex, f.c]}
++            for f in features
++        ] + [
++            {"name": f.name, "units": f.units, "joints": [f.joint]} for f in SPEED_FEATURES
+         ],
+         "rows": rows,
+     }
+diff --git a/backend/features/db.py b/backend/features/db.py
+new file mode 100644
+index 0000000..2c6a29f
+--- /dev/null
++++ b/backend/features/db.py
+@@ -0,0 +1,82 @@
++"""Save feature rows into a database table.
++
++SQLite for now (standard library, one local file). The table matches the one
++proposed in README.md, so the same rows can go into Supabase/Postgres later
++(see features/schema_postgres.sql).
++"""
++
++import sqlite3
++from pathlib import Path
++
++from .store import to_db_rows
++
++DB_FIELDS = ["video_id", "frame_index", "timestamp_ms", "frame_status", "feature",
++             "value", "units", "status", "missing_reason"]
++
++SCHEMA = """
++create table if not exists pose_features (
++  video_id       text not null,
++  frame_index    integer not null,
++  timestamp_ms   integer not null,
++  frame_status   text not null,          -- OK / LOW_CONFIDENCE / NO_POSE
++  feature        text not null,
++  value          real,                   -- null when missing, never 0
++  units          text not null,
++  status         text not null check (status in ('ok', 'missing')),
++  missing_reason text,
++  primary key (video_id, frame_index, feature)
++);
++"""
++
++
++def feature_names():
++    from .angles import FEATURES
++    from .velocity import SPEED_FEATURES
++
++    angles = [f.name for f in FEATURES]
++    velocities = [f"{name.removesuffix('_angle')}_velocity" for name in angles]
++    return angles + velocities + [f.name for f in SPEED_FEATURES]
++
++
++def wide_view_sql(names):
++    """One row per frame, one column per feature: easier to read than the long table."""
++    columns = ",\n  ".join(
++        f"max(case when feature = '{name}' then value end) as {name}" for name in names)
++    return (f"create view pose_features_wide as\n"
++            f"select video_id, frame_index, timestamp_ms, frame_status,\n  {columns}\n"
++            f"from pose_features\ngroup by video_id, frame_index, timestamp_ms, frame_status;")
++
++
++def connect(path):
++    Path(path).parent.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(path)
++    conn.executescript(SCHEMA)
++    conn.execute("drop view if exists pose_features_wide")
++    conn.execute(wide_view_sql(feature_names()))
++    return conn
++
++
++def save_features_db(doc, path):
++    """Replace this video's rows in the table. Returns the number of rows written."""
++    rows = to_db_rows(doc)
++    with connect(path) as conn:
++        conn.execute("delete from pose_features where video_id = ?", (doc["video_id"],))
++        conn.executemany(
++            f"insert into pose_features ({', '.join(DB_FIELDS)}) "
++            f"values ({', '.join('?' for _ in DB_FIELDS)})",
++            [[row.get(k) for k in DB_FIELDS] for row in rows])
++    conn.close()
++    return len(rows)
++
++
++def load_features_db(path, video_id):
++    """Rows for one video, ordered by frame then feature, as dicts."""
++    conn = connect(path)
++    conn.row_factory = sqlite3.Row
++    try:
++        cursor = conn.execute(
++            "select * from pose_features where video_id = ? order by frame_index, feature",
++            (video_id,))
++        return [dict(r) for r in cursor]
++    finally:
++        conn.close()
+diff --git a/backend/features/schema_postgres.sql b/backend/features/schema_postgres.sql
+new file mode 100644
+index 0000000..bb862a7
+--- /dev/null
++++ b/backend/features/schema_postgres.sql
+@@ -0,0 +1,41 @@
++-- Same table as features/db.py, for Supabase/Postgres.
++-- video_id is text here; switch it to uuid references reference_videos(id)
++-- once Satwik and Aronno settle the video table.
++create table if not exists pose_features (
++  video_id       text not null,
++  frame_index    integer not null,
++  timestamp_ms   integer not null,
++  frame_status   text not null,          -- OK / LOW_CONFIDENCE / NO_POSE
++  feature        text not null,
++  value          double precision,       -- null when missing, never 0
++  units          text not null,
++  status         text not null check (status in ('ok', 'missing')),
++  missing_reason text,
++  primary key (video_id, frame_index, feature)
++);
++
++-- One row per frame, one column per feature (angles, angle velocities, speeds).
++create or replace view pose_features_wide as
++select video_id, frame_index, timestamp_ms, frame_status,
++  max(value) filter (where feature = 'left_elbow_angle') as left_elbow_angle,
++  max(value) filter (where feature = 'right_elbow_angle') as right_elbow_angle,
++  max(value) filter (where feature = 'left_knee_angle') as left_knee_angle,
++  max(value) filter (where feature = 'right_knee_angle') as right_knee_angle,
++  max(value) filter (where feature = 'left_shoulder_angle') as left_shoulder_angle,
++  max(value) filter (where feature = 'right_shoulder_angle') as right_shoulder_angle,
++  max(value) filter (where feature = 'left_hip_angle') as left_hip_angle,
++  max(value) filter (where feature = 'right_hip_angle') as right_hip_angle,
++  max(value) filter (where feature = 'left_elbow_velocity') as left_elbow_velocity,
++  max(value) filter (where feature = 'right_elbow_velocity') as right_elbow_velocity,
++  max(value) filter (where feature = 'left_knee_velocity') as left_knee_velocity,
++  max(value) filter (where feature = 'right_knee_velocity') as right_knee_velocity,
++  max(value) filter (where feature = 'left_shoulder_velocity') as left_shoulder_velocity,
++  max(value) filter (where feature = 'right_shoulder_velocity') as right_shoulder_velocity,
++  max(value) filter (where feature = 'left_hip_velocity') as left_hip_velocity,
++  max(value) filter (where feature = 'right_hip_velocity') as right_hip_velocity,
++  max(value) filter (where feature = 'left_wrist_speed') as left_wrist_speed,
++  max(value) filter (where feature = 'right_wrist_speed') as right_wrist_speed,
++  max(value) filter (where feature = 'left_ankle_speed') as left_ankle_speed,
++  max(value) filter (where feature = 'right_ankle_speed') as right_ankle_speed
++from pose_features
++group by video_id, frame_index, timestamp_ms, frame_status;
+diff --git a/backend/features/supabase_store.py b/backend/features/supabase_store.py
+new file mode 100644
+index 0000000..b859e69
+--- /dev/null
++++ b/backend/features/supabase_store.py
+@@ -0,0 +1,71 @@
++"""Save and load feature rows in Supabase (the `pose_features` table).
++
++Run features/schema_postgres.sql in the Supabase SQL editor once to create the
++table. Then set two environment variables (never commit them):
++
++    SUPABASE_URL  e.g. https://<project>.supabase.co
++    SUPABASE_KEY  a key allowed to write the table (service role, or anon with
++                  a row-level-security policy that permits it)
++
++Uses Supabase's REST API through the standard library, so no extra package is
++needed.
++"""
++
++import json
++import os
++import urllib.parse
++import urllib.request
++
++from .db import DB_FIELDS
++from .store import to_db_rows
++
++TABLE = "pose_features"
++BATCH_SIZE = 1000  # Supabase returns at most 1000 rows per request by default.
++
++
++def _settings(url=None, key=None):
++    url = url or os.environ.get("SUPABASE_URL")
++    key = key or os.environ.get("SUPABASE_KEY")
++    if not url or not key:
++        raise RuntimeError("Set SUPABASE_URL and SUPABASE_KEY to use Supabase.")
++    return url.rstrip("/"), key
++
++
++def _request(method, url, key, body=None, extra_headers=None):
++    headers = {"apikey": key, "Authorization": f"Bearer {key}",
++               "Content-Type": "application/json", **(extra_headers or {})}
++    data = None if body is None else json.dumps(body).encode()
++    request = urllib.request.Request(url, data=data, headers=headers, method=method)
++    with urllib.request.urlopen(request, timeout=60) as response:
++        text = response.read().decode()
++        return json.loads(text) if text else None
++
++
++def _video_filter(video_id):
++    return "video_id=eq." + urllib.parse.quote(video_id, safe="")
++
++
++def save_features_supabase(doc, url=None, key=None):
++    """Replace this video's rows in Supabase. Returns the number of rows written."""
++    base, key = _settings(url, key)
++    endpoint = f"{base}/rest/v1/{TABLE}"
++    _request("DELETE", f"{endpoint}?{_video_filter(doc['video_id'])}", key)
++    rows = [{k: row.get(k) for k in DB_FIELDS} for row in to_db_rows(doc)]
++    for start in range(0, len(rows), BATCH_SIZE):
++        _request("POST", endpoint, key, rows[start:start + BATCH_SIZE],
++                 {"Prefer": "return=minimal"})
++    return len(rows)
++
++
++def load_features_supabase(video_id, url=None, key=None):
++    """Rows for one video, ordered by frame then feature, as dicts."""
++    base, key = _settings(url, key)
++    rows, offset = [], 0
++    while True:
++        page = _request(
++            "GET", f"{base}/rest/v1/{TABLE}?select=*&{_video_filter(video_id)}"
++                   f"&order=frame_index,feature&limit={BATCH_SIZE}&offset={offset}", key)
++        rows.extend(page)
++        if len(page) < BATCH_SIZE:
++            return rows
++        offset += BATCH_SIZE
+diff --git a/backend/features/velocity.py b/backend/features/velocity.py
+new file mode 100644
+index 0000000..3f6d834
+--- /dev/null
++++ b/backend/features/velocity.py
+@@ -0,0 +1,99 @@
++"""Velocity features: how fast joints move between consecutive frames.
++
++- `<angle>_velocity`: change in each joint angle per second (degrees/s).
++  Positive means the joint is opening (straightening), negative closing.
++- `<joint>_speed`: how fast a keypoint moves in MediaPipe's 3D world
++  coordinates (meters/s). World coordinates are centred on the hips, so this is
++  speed relative to the body, not travel across the room.
++
++Each value compares a frame with the frame just before it. It is missing (None,
++with a reason) when the frame has no pose, for the first frame, when either frame lacks the value, or when
++the timestamps don't increase. Missing values are never written as 0.
++"""
++
++import math
++from dataclasses import dataclass
++
++from .angles import FEATURES
++
++
++@dataclass(frozen=True)
++class SpeedFeature:
++    name: str
++    joint: str
++    units: str = "m/s"
++
++
++SPEED_FEATURES = [SpeedFeature(f"{j}_speed", j) for j in
++                  ("left_wrist", "right_wrist", "left_ankle", "right_ankle")]
++ANGLE_VELOCITY_UNITS = "degrees/s"
++
++
++def _missing(row, reason):
++    row["missing_reason"] = reason
++    return row
++
++
++def _base_row(frame, name, units):
++    return {"frame_index": frame.frame_index, "timestamp_ms": frame.timestamp_ms,
++            "frame_status": frame.frame_status, "feature": name, "value": None,
++            "units": units, "status": "missing", "missing_reason": None}
++
++
++def _point(frame, joint):
++    landmark = frame.landmarks.get(joint) if frame.pose_present else None
++    if landmark is None or landmark.world is None or not landmark.reliable:
++        return None
++    return landmark.world
++
++
++def velocity_rows(frames, angle_rows):
++    """Velocity rows for all frames. `angle_rows` are the rows from angles.py."""
++    angle_value = {(r["frame_index"], r["feature"]): r["value"] for r in angle_rows}
++    rows = []
++    previous = None
++    for frame in frames:
++        dt = None if previous is None else (frame.timestamp_ms - previous.timestamp_ms) / 1000
++
++        for feature in FEATURES:
++            row = _base_row(frame, f"{feature.name.removesuffix('_angle')}_velocity",
++                            ANGLE_VELOCITY_UNITS)
++            if not frame.pose_present:
++                rows.append(_missing(row, "no_pose_detected"))
++                continue
++            if previous is None:
++                rows.append(_missing(row, "first_frame"))
++                continue
++            if dt <= 0:
++                rows.append(_missing(row, "non_increasing_timestamp"))
++                continue
++            now = angle_value.get((frame.frame_index, feature.name))
++            before = angle_value.get((previous.frame_index, feature.name))
++            if now is None or before is None:
++                rows.append(_missing(row, "angle_missing_in_this_or_previous_frame"))
++                continue
++            row["value"] = round((now - before) / dt, 3)
++            row["status"] = "ok"
++            rows.append(row)
++
++        for feature in SPEED_FEATURES:
++            row = _base_row(frame, feature.name, feature.units)
++            if not frame.pose_present:
++                rows.append(_missing(row, "no_pose_detected"))
++                continue
++            if previous is None:
++                rows.append(_missing(row, "first_frame"))
++                continue
++            if dt <= 0:
++                rows.append(_missing(row, "non_increasing_timestamp"))
++                continue
++            now, before = _point(frame, feature.joint), _point(previous, feature.joint)
++            if now is None or before is None:
++                rows.append(_missing(row, f"unavailable:{feature.joint}"))
++                continue
++            row["value"] = round(math.dist(now, before) / dt, 4)
++            row["status"] = "ok"
++            rows.append(row)
++
++        previous = frame
++    return rows
+diff --git a/backend/tests/test_db.py b/backend/tests/test_db.py
+new file mode 100644
+index 0000000..f30bef4
+--- /dev/null
++++ b/backend/tests/test_db.py
+@@ -0,0 +1,31 @@
++from features import compute_features, load_features_db, save_features_db
++
++from test_features import STRAIGHT_ARM, write_pose_csv
++from features import read_pose_csv
++
++
++def doc_for(tmp_path, video_id):
++    csv_path = write_pose_csv(tmp_path / "pose.csv", [(0, 0, "OK", STRAIGHT_ARM),
++                                                       (1, 33, "NO_POSE", {})])
++    return compute_features(video_id, read_pose_csv(csv_path))
++
++
++def test_rows_round_trip_and_missing_stays_null(tmp_path):
++    db = tmp_path / "stepsync.db"
++    doc = doc_for(tmp_path, "reze")
++    assert save_features_db(doc, db) == len(doc["rows"])
++
++    rows = load_features_db(db, "reze")
++    assert len(rows) == len(doc["rows"])
++    elbow = next(r for r in rows if r["frame_index"] == 0 and r["feature"] == "left_elbow_angle")
++    assert elbow["value"] == 180.0 and elbow["status"] == "ok"
++    assert all(r["value"] is None and r["missing_reason"] == "no_pose_detected"
++               for r in rows if r["frame_index"] == 1)
++
++
++def test_saving_again_replaces_only_that_video(tmp_path):
++    db = tmp_path / "stepsync.db"
++    save_features_db(doc_for(tmp_path, "reze"), db)
++    save_features_db(doc_for(tmp_path, "forest"), db)
++    save_features_db(doc_for(tmp_path, "reze"), db)
++    assert len(load_features_db(db, "reze")) == len(load_features_db(db, "forest"))
+diff --git a/backend/tests/test_features.py b/backend/tests/test_features.py
+index c026c93..c40897c 100644
+--- a/backend/tests/test_features.py
++++ b/backend/tests/test_features.py
+@@ -87,7 +87,8 @@ def test_absent_joint_reports_which(synthetic):
+ 
+ def test_timestamps_and_units_carried_through(synthetic):
+     assert row(synthetic, 1, "left_elbow_angle")["timestamp_ms"] == 33
+-    assert {r["units"] for r in synthetic["rows"]} == {"degrees"}
++    assert {r["units"] for r in synthetic["rows"]} == {"degrees", "degrees/s", "m/s"}
++    assert {r["units"] for r in synthetic["rows"] if r["feature"].endswith("_angle")} == {"degrees"}
+ 
+ 
+ # Kaitlyn's real outputs.
+@@ -97,7 +98,7 @@ def test_real_reze_file():
+     assert len(frames) == 616
+     assert sum(f.frame_status == "NO_POSE" for f in frames) == 129
+     doc = compute_features("reze", frames)
+-    values = [r["value"] for r in doc["rows"] if r["status"] == "ok"]
++    values = [r["value"] for r in doc["rows"] if r["status"] == "ok" and r["units"] == "degrees"]
+     assert values
+     assert all(0 <= v <= 180 for v in values)
+ 
+diff --git a/backend/tests/test_velocity.py b/backend/tests/test_velocity.py
+new file mode 100644
+index 0000000..3e5bfd1
+--- /dev/null
++++ b/backend/tests/test_velocity.py
+@@ -0,0 +1,99 @@
++import json
++
++import pytest
++
++from features import compute_features, read_pose_csv
++from features.supabase_store import load_features_supabase, save_features_supabase
++from test_features import BENT_ARM, OUTPUT, STRAIGHT_ARM, row, write_pose_csv
++
++
++@pytest.fixture
++def moving(tmp_path):
++    path = write_pose_csv(tmp_path / "pose.csv", [
++        (0, 0, "OK", STRAIGHT_ARM),
++        (1, 500, "OK", BENT_ARM),     # elbow 180 -> 90 degrees in 0.5 s
++        (2, 600, "NO_POSE", {}),
++        (3, 700, "OK", BENT_ARM),
++    ])
++    return compute_features("moving", read_pose_csv(path))
++
++
++def test_angle_velocity_degrees_per_second(moving):
++    r = row(moving, 1, "left_elbow_velocity")
++    assert r["value"] == pytest.approx(-180, abs=1)  # closing at 180 degrees/s
++    assert r["units"] == "degrees/s" and r["timestamp_ms"] == 500
++
++
++def test_keypoint_speed_meters_per_second(moving):
++    # Wrist moves from (0, 0.6, 0) to (0, 0.3, -0.25): ~0.39 m in 0.5 s.
++    assert row(moving, 1, "left_wrist_speed")["value"] == pytest.approx(0.781, abs=0.01)
++
++
++def test_velocity_missing_not_zero(moving):
++    assert row(moving, 0, "left_elbow_velocity")["missing_reason"] == "first_frame"
++    assert row(moving, 2, "left_elbow_velocity")["value"] is None
++    after_gap = row(moving, 3, "left_elbow_velocity")
++    assert after_gap["value"] is None and after_gap["status"] == "missing"
++
++
++def test_real_reze_velocities_present():
++    doc = compute_features("reze", read_pose_csv(OUTPUT / "reze_pose_data.csv"))
++    ok = [r for r in doc["rows"] if r["status"] == "ok" and r["units"] == "m/s"]
++    assert ok and all(r["value"] >= 0 for r in ok)
++
++
++class FakeSupabase:
++    """Stands in for urllib so the REST calls can be checked without a network."""
++
++    def __init__(self):
++        self.table, self.calls = [], []
++
++    def urlopen(self, request, timeout):
++        self.calls.append((request.method, request.full_url))
++        assert request.headers["Apikey"] == "test-key"
++        body = b""
++        if request.method == "DELETE":
++            self.table = [r for r in self.table if r["video_id"] != "moving"]
++        elif request.method == "POST":
++            self.table.extend(json.loads(request.data))
++        elif request.method == "GET":
++            offset = int(request.full_url.split("offset=")[1])
++            body = json.dumps(self.table[offset:offset + 1000]).encode()
++        return FakeResponse(body)
++
++
++class FakeResponse:
++    def __init__(self, body):
++        self.body = body
++
++    def read(self):
++        return self.body
++
++    def __enter__(self):
++        return self
++
++    def __exit__(self, *exc):
++        return False
++
++
++def test_supabase_save_then_load_matches(moving, monkeypatch):
++    fake = FakeSupabase()
++    monkeypatch.setattr("urllib.request.urlopen", fake.urlopen)
++    settings = {"url": "https://example.supabase.co", "key": "test-key"}
++
++    assert save_features_supabase(moving, **settings) == len(moving["rows"])
++    save_features_supabase(moving, **settings)  # re-saving replaces, not duplicates
++    loaded = load_features_supabase("moving", **settings)
++
++    assert len(loaded) == len(moving["rows"])
++    assert loaded[0]["video_id"] == "moving"
++    assert {(r["frame_index"], r["feature"], r["value"], r["timestamp_ms"]) for r in loaded} == \
++        {(r["frame_index"], r["feature"], r["value"], r["timestamp_ms"]) for r in moving["rows"]}
++    assert fake.calls[0][0] == "DELETE" and "video_id=eq.moving" in fake.calls[0][1]
++
++
++def test_supabase_needs_settings(moving, monkeypatch):
++    monkeypatch.delenv("SUPABASE_URL", raising=False)
++    monkeypatch.delenv("SUPABASE_KEY", raising=False)
++    with pytest.raises(RuntimeError, match="SUPABASE_URL"):
++        save_features_supabase(moving)
