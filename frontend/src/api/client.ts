@@ -135,3 +135,8 @@ async function appendVideo(body: FormData, field: string, video: PickedVideo) {
     type: video.mimeType,
   } as unknown as Blob);
 }
+
+/** URL the video player can stream a backend-saved video from (GET /videos/{filename}). */
+export function savedVideoUrl(filename: string): string | null {
+  return API_URL ? `${API_URL}/videos/${encodeURIComponent(filename)}` : null;
+}

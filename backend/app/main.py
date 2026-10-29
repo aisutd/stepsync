@@ -11,7 +11,7 @@ from typing import Callable
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from .config import Settings
@@ -159,6 +159,16 @@ def create_app(
         except Exception:
             logger.exception("Local video validation failed")
             raise VideoError("processing_failed", "Video inspection failed unexpectedly. Check the backend logs.", 500)
+
+    @app.get("/videos/{filename}")
+    def video_file(filename: str):
+        """Stream a video saved by /reference-videos, so the app can preview it.
+
+        Supports HTTP range requests, which iOS needs to play video.
+        Only bare filenames from the saved-videos folder are served (see find_saved_video).
+        """
+        path = find_saved_video(filename, settings.video_directory)
+        return FileResponse(path, media_type="video/mp4")
 
     @app.post("/analyze")
     def analyze(

@@ -13,10 +13,11 @@ import {
   View,
 } from 'react-native';
 
-import { importYouTube, usingMockApi } from '@/api/client';
-import type { DanceStep, PickedVideo, YouTubeImportResponse, YouTubeSource } from '@/api/types';
+import { importYouTube, savedVideoUrl, usingMockApi } from '@/api/client';
+import type { PickedVideo, YouTubeImportResponse, YouTubeSource } from '@/api/types';
 import { parseYouTubeUrl, youtubeThumbnail } from '@/api/youtube';
 import { PrimaryButton } from '@/components/primary-button';
+import { StepPlayer } from '@/components/step-player';
 import { useSession } from '@/state/session';
 import { colors, radius } from '@/theme';
 
@@ -223,9 +224,6 @@ function UploadedView({
         <Text style={styles.successTitle}>{saved ? 'Dance uploaded' : 'Uploaded, not saved to Supabase'}</Text>
       </View>
 
-      <View style={styles.preview}>
-        <Image source={{ uri: youtubeThumbnail(yt.videoId) }} style={styles.thumbnail} resizeMode="cover" />
-      </View>
       <Text style={styles.videoTitle} numberOfLines={2}>
         {yt.title}
       </Text>
@@ -245,13 +243,12 @@ function UploadedView({
         <Text style={styles.warning}>{result.supabase_error ?? result.pose_error ?? 'Supabase save failed.'}</Text>
       )}
 
-      {steps.length > 0 && (
-        <View style={styles.steps}>
-          {steps.map((step) => (
-            <StepRow key={step.step_index} step={step} />
-          ))}
-        </View>
-      )}
+      <StepPlayer
+        source={yt.serverFilename ? savedVideoUrl(yt.serverFilename) : null}
+        thumbnail={youtubeThumbnail(yt.videoId)}
+        steps={steps}
+        durationMs={video.durationMs}
+      />
 
       <PrimaryButton label="Practice this dance" onPress={onPractice} />
       <View style={styles.secondaryRow}>
@@ -263,28 +260,6 @@ function UploadedView({
         </Pressable>
       </View>
     </>
-  );
-}
-
-const INTENSITY = { slow: 'Slow', medium: 'Medium', fast: 'Fast' } as const;
-
-function StepRow({ step }: { step: DanceStep }) {
-  const focus = step.focus.map((part) => part[0].toUpperCase() + part.slice(1)).join(' + ');
-  return (
-    <View style={styles.stepRow}>
-      <View style={styles.stepNumber}>
-        <Text style={styles.stepNumberText}>{step.step_index + 1}</Text>
-      </View>
-      <View style={styles.stepText}>
-        <Text style={styles.stepTime}>
-          {formatSeconds(step.start_ms)} to {formatSeconds(step.end_ms)}
-        </Text>
-        <Text style={styles.stepDetail}>
-          {INTENSITY[step.intensity]}
-          {focus ? ` · ${focus}` : ''}
-        </Text>
-      </View>
-    </View>
   );
 }
 
@@ -305,14 +280,6 @@ function toVideo(youtube: YouTubeSource, durationMs: number | null): PickedVideo
     durationMs,
     youtube,
   };
-}
-
-// Steps are 1 to 4 seconds long, so show tenths: 1.5s, 1:02.3
-function formatSeconds(ms: number): string {
-  const total = ms / 1000;
-  const minutes = Math.floor(total / 60);
-  const rest = (total - minutes * 60).toFixed(1);
-  return minutes > 0 ? `${minutes}:${rest.padStart(4, '0')}` : `${rest}s`;
 }
 
 function formatClock(seconds: number): string {
@@ -403,28 +370,6 @@ const styles = StyleSheet.create({
   },
   statValue: { color: colors.text, fontSize: 18, fontWeight: '700' },
   statLabel: { color: colors.muted, fontSize: 12 },
-  steps: { gap: 8 },
-  stepRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: radius.sm,
-    backgroundColor: colors.surface,
-  },
-  stepNumber: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: colors.pill,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  stepNumberText: { color: colors.pillText, fontSize: 13, fontWeight: '700' },
-  stepText: { flex: 1, gap: 1 },
-  stepTime: { color: colors.text, fontSize: 14, fontWeight: '600', fontVariant: ['tabular-nums'] },
-  stepDetail: { color: colors.muted, fontSize: 13 },
   secondaryRow: { flexDirection: 'row', justifyContent: 'space-around', paddingTop: 4 },
   link: { color: colors.accent, fontSize: 15, fontWeight: '600' },
 });
