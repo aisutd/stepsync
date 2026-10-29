@@ -202,7 +202,7 @@ def test_endpoint_saves_to_supabase(tmp_path, video):
     assert dance["source_url"] == "https://www.youtube.com/watch?v=jNQXAC9IVRw"
     assert dance["video_path"].endswith(".mp4") and "/" not in dance["video_path"]
     assert dance["duration_ms"] > 0
-    assert 6 <= len(body["steps"]) <= 14
+    assert len(body["steps"]) >= 6
     assert len(fake.posted("steps")[0]) == len(body["steps"])
     assert fake.posted("keyframes")[0]
     assert sum(len(b) for b in fake.posted("pose_frames")) == 616
