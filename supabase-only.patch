@@ -1,0 +1,261 @@
+diff --git a/backend/features/README.md b/backend/features/README.md
+index 3ae7786..48cb9be 100644
+--- a/backend/features/README.md
++++ b/backend/features/README.md
+@@ -10,9 +10,8 @@ From `stepsync/backend`:
+ 
+ ```powershell
+ python -m features output/reze_pose_data.csv --video-id reze --csv --frame 0 --frame 150
+-python -m features output/reze_pose_data.csv --video-id reze --db output/stepsync.db
+ python -m features output/reze_pose_data.csv --video-id reze --supabase
+-python -m pytest tests/test_features.py tests/test_db.py tests/test_velocity.py -q
++python -m pytest tests/test_features.py tests/test_velocity.py -q
+ ```
+ 
+ The first command writes `output/features/reze_features.json`, plus a `.csv`
+@@ -75,20 +74,12 @@ can have a few unreliable joints, since that status only needs 75% of the core j
+ }
+ ```
+ 
+-## Table storage
+-
+-`--db <file>` also writes the rows into the `pose_features` table of a SQLite
+-file (`features/db.py`, standard library only). Re-running a video replaces
+-only that video's rows. The `pose_features_wide` view shows one row per frame
+-with one column per angle. `features/schema_postgres.sql` is the same table and
+-view for Supabase/Postgres.
+-
+-```sql
+-select * from pose_features_wide where video_id = 'reze' limit 5;
+-```
+-
+ ## Supabase
+ 
++Rows are stored in the `pose_features` table in Supabase (one row per frame
++per feature). `select * from pose_features_wide where video_id = 'reze'` shows
++one row per frame with one column per feature.
++
+ 1. In the Supabase SQL editor, run `features/schema_postgres.sql` once.
+ 2. Set `SUPABASE_URL` and `SUPABASE_KEY` (environment variables, never committed).
+ 3. `python -m features <pose csv> --video-id <id> --supabase` replaces that
+diff --git a/backend/features/__init__.py b/backend/features/__init__.py
+index d570b28..75ab685 100644
+--- a/backend/features/__init__.py
++++ b/backend/features/__init__.py
+@@ -1,6 +1,5 @@
+ """Joint-angle feature extraction and storage (Lucy)."""
+ 
+-from .db import load_features_db, save_features_db
+ from .angles import FEATURES, angle_degrees, compute_features
+ from .pose_csv import read_pose_csv
+ from .store import load_features, save_features, save_features_csv, to_db_rows
+diff --git a/backend/features/__main__.py b/backend/features/__main__.py
+index 8d4d53f..9690f5e 100644
+--- a/backend/features/__main__.py
++++ b/backend/features/__main__.py
+@@ -2,7 +2,6 @@
+ 
+     python -m features output/reze_pose_data.csv --video-id reze
+     python -m features output/reze_pose_data.csv --video-id reze --frame 100
+-    python -m features output/reze_pose_data.csv --video-id reze --db output/stepsync.db
+     python -m features output/reze_pose_data.csv --video-id reze --supabase
+ """
+ 
+@@ -11,7 +10,6 @@ from pathlib import Path
+ 
+ from .angles import compute_features
+ from .pose_csv import read_pose_csv
+-from .db import save_features_db
+ from .store import save_features, save_features_csv
+ 
+ 
+@@ -22,8 +20,6 @@ def main():
+     parser.add_argument("--video-id", required=True, help="ID the features are saved under")
+     parser.add_argument("--output-dir", default="output/features")
+     parser.add_argument("--csv", action="store_true", help="Also write a CSV copy")
+-    parser.add_argument("--db", help="Also write the rows into the pose_features table "
+-                                     "of this SQLite file")
+     parser.add_argument("--supabase", action="store_true",
+                         help="Also write the rows to Supabase (needs SUPABASE_URL and SUPABASE_KEY)")
+     parser.add_argument("--frame", type=int, action="append",
+@@ -40,8 +36,6 @@ def main():
+     print(f"Saved: {path}")
+     if args.csv:
+         print(f"CSV:   {save_features_csv(doc, path.with_suffix('.csv'))}")
+-    if args.db:
+-        print(f"Table: {save_features_db(doc, args.db)} rows in pose_features ({args.db})")
+     if args.supabase:
+         from .supabase_store import save_features_supabase
+         print(f"Supabase: {save_features_supabase(doc)} rows in pose_features")
+diff --git a/backend/features/db.py b/backend/features/db.py
+deleted file mode 100644
+index 2c6a29f..0000000
+--- a/backend/features/db.py
++++ /dev/null
+@@ -1,82 +0,0 @@
+-"""Save feature rows into a database table.
+-
+-SQLite for now (standard library, one local file). The table matches the one
+-proposed in README.md, so the same rows can go into Supabase/Postgres later
+-(see features/schema_postgres.sql).
+-"""
+-
+-import sqlite3
+-from pathlib import Path
+-
+-from .store import to_db_rows
+-
+-DB_FIELDS = ["video_id", "frame_index", "timestamp_ms", "frame_status", "feature",
+-             "value", "units", "status", "missing_reason"]
+-
+-SCHEMA = """
+-create table if not exists pose_features (
+-  video_id       text not null,
+-  frame_index    integer not null,
+-  timestamp_ms   integer not null,
+-  frame_status   text not null,          -- OK / LOW_CONFIDENCE / NO_POSE
+-  feature        text not null,
+-  value          real,                   -- null when missing, never 0
+-  units          text not null,
+-  status         text not null check (status in ('ok', 'missing')),
+-  missing_reason text,
+-  primary key (video_id, frame_index, feature)
+-);
+-"""
+-
+-
+-def feature_names():
+-    from .angles import FEATURES
+-    from .velocity import SPEED_FEATURES
+-
+-    angles = [f.name for f in FEATURES]
+-    velocities = [f"{name.removesuffix('_angle')}_velocity" for name in angles]
+-    return angles + velocities + [f.name for f in SPEED_FEATURES]
+-
+-
+-def wide_view_sql(names):
+-    """One row per frame, one column per feature: easier to read than the long table."""
+-    columns = ",\n  ".join(
+-        f"max(case when feature = '{name}' then value end) as {name}" for name in names)
+-    return (f"create view pose_features_wide as\n"
+-            f"select video_id, frame_index, timestamp_ms, frame_status,\n  {columns}\n"
+-            f"from pose_features\ngroup by video_id, frame_index, timestamp_ms, frame_status;")
+-
+-
+-def connect(path):
+-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+-    conn = sqlite3.connect(path)
+-    conn.executescript(SCHEMA)
+-    conn.execute("drop view if exists pose_features_wide")
+-    conn.execute(wide_view_sql(feature_names()))
+-    return conn
+-
+-
+-def save_features_db(doc, path):
+-    """Replace this video's rows in the table. Returns the number of rows written."""
+-    rows = to_db_rows(doc)
+-    with connect(path) as conn:
+-        conn.execute("delete from pose_features where video_id = ?", (doc["video_id"],))
+-        conn.executemany(
+-            f"insert into pose_features ({', '.join(DB_FIELDS)}) "
+-            f"values ({', '.join('?' for _ in DB_FIELDS)})",
+-            [[row.get(k) for k in DB_FIELDS] for row in rows])
+-    conn.close()
+-    return len(rows)
+-
+-
+-def load_features_db(path, video_id):
+-    """Rows for one video, ordered by frame then feature, as dicts."""
+-    conn = connect(path)
+-    conn.row_factory = sqlite3.Row
+-    try:
+-        cursor = conn.execute(
+-            "select * from pose_features where video_id = ? order by frame_index, feature",
+-            (video_id,))
+-        return [dict(r) for r in cursor]
+-    finally:
+-        conn.close()
+diff --git a/backend/features/schema_postgres.sql b/backend/features/schema_postgres.sql
+index bb862a7..04d780f 100644
+--- a/backend/features/schema_postgres.sql
++++ b/backend/features/schema_postgres.sql
+@@ -1,4 +1,4 @@
+--- Same table as features/db.py, for Supabase/Postgres.
++-- The pose_features table and view for Supabase/Postgres.
+ -- video_id is text here; switch it to uuid references reference_videos(id)
+ -- once Satwik and Aronno settle the video table.
+ create table if not exists pose_features (
+diff --git a/backend/features/store.py b/backend/features/store.py
+index 7f3d4ad..a5f3020 100644
+--- a/backend/features/store.py
++++ b/backend/features/store.py
+@@ -1,7 +1,7 @@
+ """Save and load feature documents by video ID.
+ 
+-Local JSON files for now. When the database exists, `to_db_rows` gives one flat
+-record per (frame, feature) that maps directly onto a table (see README.md).
++Local JSON/CSV files. `to_db_rows` gives one flat record per (frame, feature)
++for the Supabase `pose_features` table (see supabase_store.py).
+ """
+ 
+ import csv
+@@ -10,6 +10,8 @@ import re
+ from pathlib import Path
+ 
+ REQUIRED_ROW_FIELDS = {"frame_index", "timestamp_ms", "feature", "value", "units", "status"}
++DB_FIELDS = ["video_id", "frame_index", "timestamp_ms", "frame_status", "feature",
++             "value", "units", "status", "missing_reason"]
+ CSV_FIELDS = ["video_id", "frame_index", "timestamp_ms", "frame_status", "feature",
+               "value", "units", "status", "missing_reason"]
+ 
+diff --git a/backend/features/supabase_store.py b/backend/features/supabase_store.py
+index b859e69..c0dc5f3 100644
+--- a/backend/features/supabase_store.py
++++ b/backend/features/supabase_store.py
+@@ -16,8 +16,7 @@ import os
+ import urllib.parse
+ import urllib.request
+ 
+-from .db import DB_FIELDS
+-from .store import to_db_rows
++from .store import DB_FIELDS, to_db_rows
+ 
+ TABLE = "pose_features"
+ BATCH_SIZE = 1000  # Supabase returns at most 1000 rows per request by default.
+diff --git a/backend/tests/test_db.py b/backend/tests/test_db.py
+deleted file mode 100644
+index f30bef4..0000000
+--- a/backend/tests/test_db.py
++++ /dev/null
+@@ -1,31 +0,0 @@
+-from features import compute_features, load_features_db, save_features_db
+-
+-from test_features import STRAIGHT_ARM, write_pose_csv
+-from features import read_pose_csv
+-
+-
+-def doc_for(tmp_path, video_id):
+-    csv_path = write_pose_csv(tmp_path / "pose.csv", [(0, 0, "OK", STRAIGHT_ARM),
+-                                                       (1, 33, "NO_POSE", {})])
+-    return compute_features(video_id, read_pose_csv(csv_path))
+-
+-
+-def test_rows_round_trip_and_missing_stays_null(tmp_path):
+-    db = tmp_path / "stepsync.db"
+-    doc = doc_for(tmp_path, "reze")
+-    assert save_features_db(doc, db) == len(doc["rows"])
+-
+-    rows = load_features_db(db, "reze")
+-    assert len(rows) == len(doc["rows"])
+-    elbow = next(r for r in rows if r["frame_index"] == 0 and r["feature"] == "left_elbow_angle")
+-    assert elbow["value"] == 180.0 and elbow["status"] == "ok"
+-    assert all(r["value"] is None and r["missing_reason"] == "no_pose_detected"
+-               for r in rows if r["frame_index"] == 1)
+-
+-
+-def test_saving_again_replaces_only_that_video(tmp_path):
+-    db = tmp_path / "stepsync.db"
+-    save_features_db(doc_for(tmp_path, "reze"), db)
+-    save_features_db(doc_for(tmp_path, "forest"), db)
+-    save_features_db(doc_for(tmp_path, "reze"), db)
+-    assert len(load_features_db(db, "reze")) == len(load_features_db(db, "forest"))
