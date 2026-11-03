@@ -8,11 +8,12 @@ type Props = {
   hint: string;
   video: PickedVideo | null;
   onChoose: () => void;
+  disabled?: boolean;
   /** Omit to hide the Record button (for example on web). */
   onRecord?: () => void;
 };
 
-export function VideoSlot({ title, hint, video, onChoose, onRecord }: Props) {
+export function VideoSlot({ title, hint, video, onChoose, onRecord, disabled }: Props) {
   return (
     <View style={[styles.slot, video && styles.filled]}>
       <View style={styles.text}>
@@ -22,17 +23,20 @@ export function VideoSlot({ title, hint, video, onChoose, onRecord }: Props) {
         </Text>
       </View>
       <View style={styles.actions}>
-        {onRecord && <Action label="Record" onPress={onRecord} />}
-        <Action label={video ? 'Change' : 'Choose'} onPress={onChoose} />
+        {onRecord && <Action label="Record" onPress={onRecord} disabled={disabled} accessibilityLabel={`Record ${title.toLowerCase()}`} />}
+        <Action label={video ? 'Change' : 'Choose'} onPress={onChoose} disabled={disabled} accessibilityLabel={`Choose ${title.toLowerCase()}`} />
       </View>
     </View>
   );
 }
 
-function Action({ label, onPress }: { label: string; onPress: () => void }) {
+function Action({ label, onPress, disabled, accessibilityLabel }: { label: string; onPress: () => void; disabled?: boolean; accessibilityLabel: string }) {
   return (
     <Pressable
       onPress={onPress}
+      disabled={disabled}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
       hitSlop={8}
       style={({ pressed }) => [styles.action, pressed && styles.pressed]}
     >

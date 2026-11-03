@@ -5,9 +5,11 @@
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
+    "web": "expo start --web",
     "ios": "expo start --ios",
     "android": "expo start --android",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",

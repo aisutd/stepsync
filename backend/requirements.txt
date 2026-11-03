@@ -7,3 +7,4 @@ numpy>=2,<3
 pytest>=8,<10
 httpx>=0.27,<1
 yt-dlp[default]>=2026.3.17
+google-genai>=1,<3

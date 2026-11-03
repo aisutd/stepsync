@@ -34,6 +34,18 @@ export default function HomeScreen() {
     }
   }
 
+  async function chooseVideo(slot: 'reference' | 'practice') {
+    setError(null);
+    try {
+      const video = await pickVideo();
+      if (!video) return;
+      (slot === 'reference' ? setReference : setPractice)(video);
+      setResult(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not open the video picker.');
+    }
+  }
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.lead}>
@@ -44,18 +56,22 @@ export default function HomeScreen() {
         title="Reference video"
         hint="The choreography you want to match"
         video={reference}
-        onChoose={async () => setReference((await pickVideo()) ?? reference)}
+        onChoose={() => void chooseVideo('reference')}
+        disabled={loading}
         onRecord={canRecord ? () => router.push('/record?slot=reference') : undefined}
       />
       <VideoSlot
         title="Practice video"
         hint="Your attempt"
         video={practice}
-        onChoose={async () => setPractice((await pickVideo()) ?? practice)}
+        onChoose={() => void chooseVideo('practice')}
+        disabled={loading}
         onRecord={canRecord ? () => router.push('/record?slot=practice') : undefined}
       />
 
       <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Analyze videos"
         onPress={onAnalyze}
         disabled={!ready}
         style={({ pressed }) => [styles.button, !ready && styles.disabled, pressed && styles.pressed]}
@@ -63,18 +79,17 @@ export default function HomeScreen() {
         {loading ? (
           <View style={styles.loadingRow}>
             <ActivityIndicator color={colors.onPrimary} />
-            {progress !== null && (
-              <Text style={styles.buttonText}>
-                {progress < 1 ? `Uploading ${Math.round(progress * 100)}%` : 'Analyzing…'}
-              </Text>
-            )}
+            <Text style={styles.buttonText}>
+              {progress === null ? 'Preparing videos...' : progress < 1 ? `Uploading ${Math.round(progress * 100)}%` : 'Analyzing...'}
+            </Text>
           </View>
         ) : (
           <Text style={styles.buttonText}>Analyze</Text>
         )}
       </Pressable>
 
-      {error && <Text style={styles.error}>{error}</Text>}
+      {loading && <Text accessibilityLiveRegion="polite" style={styles.note}>Keep this page open. Pose analysis can take several minutes.</Text>}
+      {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
       {usingMockApi && (
         <Text style={styles.note}>Mock mode: feedback is sample data, nothing is uploaded.</Text>
       )}

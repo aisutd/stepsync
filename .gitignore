@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .local-tools/
+.env
+.env.*
+!.env.example
+/backend/input/
+/backend/output/
