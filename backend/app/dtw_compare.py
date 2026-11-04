@@ -122,8 +122,12 @@ def _dtw(ref, usr, band_fraction=0.30):
     return path
 
 
-def compare_csv(reference_path, practice_path, sample_hz=10):
+def compare_csv(reference_path, practice_path, sample_hz=10, reference_start=None, reference_end=None):
     ref=read_pose_csv(reference_path,sample_hz)
+    if reference_start is not None and reference_end is not None:
+        if not (math.isfinite(reference_start) and math.isfinite(reference_end) and 0 <= reference_start < reference_end):
+            raise ValueError("Invalid tutorial step boundaries.")
+        ref=[frame for frame in ref if reference_start <= frame.time <= reference_end]
     usr=read_pose_csv(practice_path,sample_hz)
     if len(ref)<6 or len(usr)<6:
         raise ValueError('Too few reliable poses detected. Use a full-body, well-lit video.')
@@ -146,7 +150,7 @@ def compare_csv(reference_path, practice_path, sample_hz=10):
     worst=max(region_errors,key=region_errors.get) if region_errors else 'body'
     steps=[]
     # Chunk by tutorial timeline, not evenly-spaced user frames.
-    pieces=min(5,max(1,math.ceil(ref_duration/4)))
+    pieces=min(12,max(3,math.ceil(ref_duration/1.5)))
     for idx in range(pieces):
         start=ref[0].time+ref_duration*idx/pieces
         end=ref[0].time+ref_duration*(idx+1)/pieces
@@ -154,16 +158,30 @@ def compare_csv(reference_path, practice_path, sample_hz=10):
         if not local:continue
         cost=sum(pose_error(ref[i],usr[j]) for i,j in local)/len(local)
         u_start=usr[local[0][1]].time; u_end=usr[local[-1][1]].time
-        score=round(100*math.exp(-3*cost))
-        message=('Strong movement match.' if score>=80 else 'Noticeable pose differences; repeat this section.' if score>=60 else 'Large movement differences; slow down and focus on your body position.')
+        movement_score=round(100*math.exp(-3*cost))
+        local_off=sum(1 for a,b in zip(local,local[1:]) if a[0]==b[0] or a[1]==b[1])
+        local_timing_score=round(100*math.exp(-1.5 * local_off / max(1,len(local)-1)))
+        score=round(0.8*movement_score+0.2*local_timing_score)
+        local_region_errors={}
+        for region, names in REGIONS.items():
+            diffs=[abs(ref[i].angles[k]-usr[j].angles[k])/math.pi for i,j in local
+                   for k in names if k in ref[i].angles and k in usr[j].angles]
+            if diffs: local_region_errors[region]=sum(diffs)/len(diffs)
+        focus=max(local_region_errors,key=local_region_errors.get) if local_region_errors else 'body position'
+        message=('Strong movement match.' if score>80 else
+                 f'{focus} differ from the tutorial here. Replay this timestamp and practice slowly.' if score>=60 else
+                 f'Large {focus} mismatch. Pause the tutorial, match your posture, then retry.')
+        if local_timing_score < 80:
+            message += ' Timing drifts in this section; rehearse to the tutorial beat.'
         steps.append({'id':str(idx+1),'label':f'Section {idx+1}',
                       'start':round(u_start,2),'end':round(max(u_start,u_end),2),
-                      'score':score,'feedback':message})
+                      'score':score,'feedback':message, 'referenceStart':round(start,2), 'referenceEnd':round(end,2)})
     extra=((f'{worst} showed the largest average angular difference. ' if mean_error>0.02 else 'Body pose aligned closely. ')
            + f'Tempo: {tempo_ratio:.2f}× tutorial duration; local timing variation: {hesitation_fraction:.0%}. '
            'These scores are experimental; verify with human-labeled recordings.')
     if steps:steps[0]['feedback']+=' '+extra
-    return {'overallScore':movement,'movementScore':movement,'timingScore':timing,
+    overall=round(0.8*movement + 0.2*timing)
+    return {'overallScore':overall,'movementScore':movement,'timingScore':timing,
             'tempoRatio':round(tempo_ratio,3),'hesitationFraction':round(hesitation_fraction,3),
             'steps':steps, 'matchedPairs':len(path),'referenceSamples':len(ref),'practiceSamples':len(usr)}
 

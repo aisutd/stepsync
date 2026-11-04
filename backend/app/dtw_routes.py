@@ -1,18 +1,18 @@
 """Authenticated real DTW video comparison, leaving legacy /analyze untouched."""
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from fastapi import APIRouter, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, UploadFile, Form
 from typing import Optional
 from .dtw_compare import compare_csv
 from .supabase_routes import bearer_token, db
 from .supabase_client import select_rows
-from .video import read_metadata
+from .video import read_metadata, normalize_for_analysis, VideoError
 
 MAX_BYTES=100_000_000
 def _save_upload(file, directory, stem):
     suffix=Path(file.filename or '').suffix.lower()
-    if suffix not in ('.mp4','.mov'):
-        raise HTTPException(415,'Only MP4 and MOV videos are supported.')
+    if suffix not in ('.mp4','.mov','.webm'):
+        raise HTTPException(415,'Only MP4, MOV and WebM videos are supported.')
     target=directory/(stem+suffix)
     count=0
     with target.open('wb') as out:
@@ -27,12 +27,22 @@ def _save_upload(file, directory, stem):
 
 
 
+def _boundaries(start_ms, end_ms):
+    if start_ms is None and end_ms is None:
+        return {}
+    if (start_ms is None or end_ms is None or start_ms < 0 or end_ms <= start_ms
+            or end_ms - start_ms < 500):
+        raise HTTPException(422, 'Choose a valid tutorial step of at least 0.5 seconds.')
+    return {'reference_start': start_ms / 1000, 'reference_end': end_ms / 1000}
+
+
 def install_dtw_routes(app, settings, pose_runner):
     router=APIRouter()
 
     @router.post('/analyze-dtw')
     def analyze_dtw(reference: UploadFile = File(...), practice: UploadFile = File(...),
-                    authorization: Optional[str] = Header(default=None)):
+                    authorization: Optional[str] = Header(default=None),
+                    step_start_ms: Optional[int] = Form(default=None), step_end_ms: Optional[int] = Form(default=None)):
         if not bearer_token(authorization):
             raise HTTPException(401,'Log in first.')
         client=db(authorization)
@@ -41,6 +51,11 @@ def install_dtw_routes(app, settings, pose_runner):
             folder=Path(d)
             ref=_save_upload(reference,folder,'reference')
             usr=_save_upload(practice,folder,'practice')
+            try:
+                ref = normalize_for_analysis(ref, settings)
+                usr = normalize_for_analysis(usr, settings)
+            except VideoError as exc:
+                raise HTTPException(exc.status_code, exc.message) from exc
             for file in (ref,usr):
                 if file.stat().st_size>settings.max_upload_bytes: raise HTTPException(413,'Video exceeds upload limit.')
                 duration=read_metadata(file).duration_seconds
@@ -49,12 +64,13 @@ def install_dtw_routes(app, settings, pose_runner):
             try:
                 ref_pose=pose_runner(ref,folder/'reference_pose',settings.pose_model_path,settings.pose_processing_timeout_seconds)
                 usr_pose=pose_runner(usr,folder/'practice_pose',settings.pose_model_path,settings.pose_processing_timeout_seconds)
-                return compare_csv(ref_pose.data_path,usr_pose.data_path)
+                return compare_csv(ref_pose.data_path,usr_pose.data_path, **_boundaries(step_start_ms, step_end_ms))
             except ValueError as error:
                 raise HTTPException(422,str(error)) from error
     @router.post('/dances/{dance_id}/analyze-dtw')
     def analyze_saved_dance(dance_id: str, practice: UploadFile = File(...),
-                           authorization: Optional[str] = Header(default=None)):
+                           authorization: Optional[str] = Header(default=None),
+                           step_start_ms: Optional[int] = Form(default=None), step_end_ms: Optional[int] = Form(default=None)):
         """Compare an uploaded practice with a YouTube/imported reference already in Storage.
 
         Always resolve the storage path from an RLS-authorized dance row, never
@@ -85,6 +101,11 @@ def install_dtw_routes(app, settings, pose_runner):
                 raise HTTPException(413, 'Reference video exceeds the upload limit.')
             ref.write_bytes(payload)
             usr = _save_upload(practice, folder, 'practice')
+            try:
+                ref = normalize_for_analysis(ref, settings)
+                usr = normalize_for_analysis(usr, settings)
+            except VideoError as exc:
+                raise HTTPException(exc.status_code, exc.message) from exc
             for file in (ref, usr):
                 if file.stat().st_size > settings.max_upload_bytes:
                     raise HTTPException(413, 'Video exceeds upload limit.')
@@ -95,7 +116,7 @@ def install_dtw_routes(app, settings, pose_runner):
                                        settings.pose_processing_timeout_seconds)
                 usr_pose = pose_runner(usr, folder / 'practice_pose', settings.pose_model_path,
                                        settings.pose_processing_timeout_seconds)
-                return compare_csv(ref_pose.data_path, usr_pose.data_path)
+                return compare_csv(ref_pose.data_path, usr_pose.data_path, **_boundaries(step_start_ms, step_end_ms))
             except ValueError as error:
                 raise HTTPException(422, str(error)) from error
 

@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { getSavedDanceVideo, listSavedDances } from '@/api/client';
+import { getSavedDanceSteps, getSavedDanceVideo, listSavedDances } from '@/api/client';
 import { useSession } from '@/state/session';
 import { colors } from '@/theme';
 
@@ -23,10 +23,10 @@ export default function ExploreScreen() {
   async function practice(dance: (typeof dances)[number]) {
     setSelecting(dance.id); setError(null);
     try {
-      const uri = await getSavedDanceVideo(dance.id);
+      const [uri, steps] = await Promise.all([getSavedDanceVideo(dance.id), getSavedDanceSteps(dance.id)]);
       setReference({ uri, fileName: `${dance.id}_skeleton.mp4`, mimeType: 'video/mp4', durationMs: dance.duration_ms,
         youtube: { url: '', videoId: '', isShort: false, title: dance.title,
-          serverFilename: `${dance.id}_skeleton.mp4`, playbackUrl: uri, danceId: dance.id } });
+          serverFilename: `${dance.id}_skeleton.mp4`, playbackUrl: uri, danceId: dance.id, steps } });
       router.push('/practice');
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setSelecting(null); }

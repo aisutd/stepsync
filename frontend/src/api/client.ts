@@ -3,7 +3,7 @@ import { Platform } from 'react-native';
 import { supabase, supabaseConfigured } from '@/lib/supabase';
 
 import { mockAnalyze } from './mock';
-import type { AnalysisResult, PickedVideo, YouTubeImportResponse } from './types';
+import type { AnalysisResult, CoachingConversation, FrameComparisonPage, MirrorMode, PickedVideo, YouTubeImportResponse, DanceStep } from './types';
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL;
 
@@ -19,10 +19,18 @@ export async function analyze(
   reference: PickedVideo,
   practice: PickedVideo,
   onProgress?: (fraction: number) => void,
+  step?: DanceStep,
 ): Promise<AnalysisResult> {
   if (!API_URL) throw new Error('Set EXPO_PUBLIC_API_URL to use real DTW analysis.');
 
   const body = new FormData();
+  if (step) {
+    if (!Number.isFinite(step.start_ms) || !Number.isFinite(step.end_ms) || step.end_ms <= step.start_ms) {
+      throw new Error('Invalid tutorial step range.');
+    }
+    body.append('step_start_ms', String(Math.round(step.start_ms)));
+    body.append('step_end_ms', String(Math.round(step.end_ms)));
+  }
   if (reference.youtube?.danceId) {
     // Saved YouTube reference stays server-side. Only upload the practice take.
     await appendVideo(body, 'practice', practice);
@@ -186,4 +194,90 @@ export async function getSavedDanceVideo(id: string): Promise<string> {
   const json = await response.json() as {url?: string};
   if (!json.url) throw new Error('No skeleton MP4 saved for this dance.');
   return json.url;
+}
+
+
+function analysisUrl(sessionId: string): string {
+  if (!API_URL) throw new Error('Saved analysis details require a connected backend.');
+  if (!/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Invalid analysis session ID.');
+  return `${API_URL.replace(/\/+$/, '')}/analyses/${sessionId}`;
+}
+
+/** Reads saved results; these requests never upload or analyze videos. */
+export async function getAnalysis(sessionId: string): Promise<AnalysisResult> {
+  return getJson<AnalysisResult>(analysisUrl(sessionId));
+}
+
+export async function getCoaching(sessionId: string): Promise<CoachingConversation> {
+  return getJson<CoachingConversation>(`${analysisUrl(sessionId)}/coaching`);
+}
+
+/** Only session ID and question go to our backend; provider credentials stay there. */
+export async function askCoach(sessionId: string, message?: string, requestId = 'initial'): Promise<CoachingConversation> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45_000);
+  try {
+    const response = await fetch(`${analysisUrl(sessionId)}/coaching`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ message, requestId }), signal: controller.signal,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail ?? data.error?.message ?? 'Coaching is unavailable. Your comparison results are still available.');
+    return data as CoachingConversation;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('AI coaching timed out. Retry coaching; your comparison results are still available.');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function getAnalysisFrames(sessionId: string, offset = 0, limit = 50): Promise<FrameComparisonPage> {
+  if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error('Use a nonnegative offset and a page size from 1 to 100.');
+  }
+  return getJson<FrameComparisonPage>(`${analysisUrl(sessionId)}/frames?offset=${offset}&limit=${limit}`);
+}
+
+/** Explicit opt-in to the large debugging download; the results screen does not fetch it. */
+export function analysisDiagnosticsUrl(sessionId: string, download = true): string {
+  return `${analysisUrl(sessionId)}/diagnostics?download=${download}`;
+}
+
+async function getJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { headers: { Accept: 'application/json' } });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(typeof data.detail === 'string' ? data.detail : data.error?.message ?? `Request failed (${response.status}).`);
+  }
+  return data as T;
+}
+
+
+/** Rodrigo's coverage-aware pose comparison and AI-coaching pipeline.
+ * Independent from authenticated Supabase /analyze-dtw.
+ */
+export async function analyzeDetailed(
+  reference: PickedVideo, practice: PickedVideo,
+  onProgress?: (fraction: number) => void, mirrorMode: MirrorMode = 'auto',
+): Promise<AnalysisResult> {
+  if (!API_URL) throw new Error('Configure EXPO_PUBLIC_API_URL first.');
+  if (reference.youtube) throw new Error('Detailed comparison currently requires a local reference video. Use DTW for imported YouTube dances.');
+  const body = new FormData();
+  await appendVideo(body, 'reference', reference);
+  await appendVideo(body, 'practice', practice);
+  body.append('mirror_mode', mirrorMode);
+  return postForm<AnalysisResult>(`${API_URL}/analyze`, body, onProgress);
+}
+
+/** Read the precise step boundaries of a saved tutorial before comparison. */
+export async function getSavedDanceSteps(id: string): Promise<DanceStep[]> {
+  if (!API_URL) throw new Error('Backend URL not configured.');
+  const response = await fetch(`${API_URL}/dances/${encodeURIComponent(id)}`, { headers: await authHeader() });
+  if (!response.ok) throw new Error(errorMessage(await response.text(), response.status));
+  const json = await response.json() as { steps?: { step_order: number; name: string; start_ms: number; end_ms: number }[] };
+  return (json.steps ?? []).map((step, i) => ({
+    step_index: i, label: step.name || `Step ${i + 1}`,
+    start_ms: step.start_ms, end_ms: step.end_ms, intensity: 'medium', focus: [],
+  })).filter(step => Number.isFinite(step.start_ms) && Number.isFinite(step.end_ms) && step.end_ms > step.start_ms);
 }

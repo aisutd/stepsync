@@ -32,6 +32,7 @@ class Settings:
     data_directory: Path = field(default_factory=default_data_directory)
     pose_model_path: Path = field(default_factory=default_pose_model_path)
     pose_processing_timeout_seconds: float = 600.0
+    analysis_retention_seconds: float = 7 * 24 * 60 * 60
 
     def __post_init__(self):
         object.__setattr__(self, "data_directory", Path(self.data_directory).expanduser().resolve())
@@ -41,7 +42,7 @@ class Settings:
         ):
             raise ValueError("Allowed extensions must start with a dot.")
         for name in ("max_upload_bytes", "max_duration_seconds", "target_fps",
-                     "max_frame_width", "max_frame_height", "pose_processing_timeout_seconds"):
+                     "max_frame_width", "max_frame_height", "pose_processing_timeout_seconds", "analysis_retention_seconds"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive and finite.")
@@ -70,4 +71,5 @@ class Settings:
             data_directory=Path(os.getenv("STEPSYNC_DATA_DIRECTORY", default_data_directory())),
             pose_model_path=Path(os.getenv("STEPSYNC_POSE_MODEL_PATH", default_pose_model_path())),
             pose_processing_timeout_seconds=float(os.getenv("STEPSYNC_POSE_PROCESSING_TIMEOUT_SECONDS", "600")),
+            analysis_retention_seconds=float(os.getenv("STEPSYNC_ANALYSIS_RETENTION_SECONDS", "604800")),
         )
