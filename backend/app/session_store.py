@@ -51,8 +51,9 @@ def _json_write(path, data):
 def compact_summary(result, session_id, created, expires):
     # Allow-list the summary, especially alignment's otherwise very large trees.
     keys = ("status", "overallScore", "movementScore", "scoreAvailable", "globalScoreAvailable", "scoreScope",
-            "coverage", "confidence", "steps", "comparisonSegments", "reason", "warnings")
+            "coverage", "confidence", "steps", "comparisonSegments", "reason", "warnings", "sideIndependentEvidence")
     summary = {k: result[k] for k in keys if k in result}
+    summary["sideIndependentEvidence"] = result.get("sideIndependentEvidence")
     rows = result.get("frameComparisons", [])
     assessed = sum(r["status"] == "compared" for r in rows)
     summary["assessment"] = {"totalFrames": len(rows), "assessedFrames": assessed,
@@ -103,7 +104,7 @@ def _artifact(directory, name):
     return path
 
 
-def load_session(root, session_id, retention):
+def load_session(root, session_id, retention, *, persist_views=True):
     if not re.fullmatch(SESSION_PATTERN, session_id):
         raise HTTPException(422, "session_id must contain exactly 32 lowercase hexadecimal characters.")
     base = Path(root).resolve()
@@ -135,6 +136,9 @@ def load_session(root, session_id, retention):
     if not manifest.is_file() or not summary_path.is_file() or not frames_path.is_file():
         # Derive storage views from existing measurements, preserving comparison.json.
         fixed_retention = (expires - created).total_seconds() if expires is not None else retention
+        if not persist_views:
+            return directory, compact_summary(_read(full), session_id, created,
+                                               created + timedelta(seconds=fixed_retention))
         _save_views(_read(full), directory, session_id, created, fixed_retention)
     return directory, _read(summary_path)
 

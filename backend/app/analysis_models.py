@@ -42,6 +42,7 @@ class AnalysisBase(BaseModel):
         "Does not require 100% frame or joint coverage and is not a whole-video correctness grade. "
         "The score still uses only assessed observations; always display assessment coverage."))
     assessment: AssessmentSummary | None = None
+    sideIndependentEvidence: dict | None = None
 
 
 class AnalysisResult(AnalysisBase):

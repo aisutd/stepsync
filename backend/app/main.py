@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 from .config import Settings
 from .handoff import ProcessingState
@@ -21,6 +22,7 @@ from .video import VideoError, validate_video
 from .youtube import download_video, validate_url
 from .storage import save_video
 from .analysis import analyze_videos
+from .recompare import RecompareRequest, recompare_session
 from .analysis_models import AnalysisSummary, FramePage
 from .comparison import ComparisonConfig
 from .coaching import CoachingRequest, coach, conversation
@@ -31,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 # Videos uploaded from the phone app by POST /analyze.
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
+BACKEND_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 UPLOAD_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm"}
 MAX_UPLOAD_BYTES = 300 * 1024 * 1024  # 300 MB per video
 
@@ -70,6 +73,7 @@ def create_app(
     comparison_config: ComparisonConfig | None = None,
     coaching_generator: Callable | None = None,
 ) -> FastAPI:
+    load_dotenv(BACKEND_ENV_PATH, override=False, encoding="utf-8-sig")
     settings = settings or Settings.from_env()
     pose_runner = pose_runner or run_pose_extraction
     app = FastAPI(title="StepSync local video backend", description=(
@@ -97,6 +101,8 @@ def create_app(
             message = "Send multipart video files named 'reference' and 'practice'; mirror_mode must be auto, same, or mirrored."
         elif request.url.path == "/reference-videos":
             message = "Send a JSON object with a nonempty string in the 'url' field."
+        elif request.url.path.endswith("/recompare"):
+            message = "Use a valid session ID and JSON with mirrorMode set to same or mirrored."
         elif request.url.path.endswith("/coaching"):
             message = "Use a valid session ID and a JSON coaching request with message (1-1000 characters) and a distinct requestId for follow-ups."
         else:
@@ -173,6 +179,13 @@ def create_app(
         except Exception as error:
             logger.exception("Comparison failed for session %s", session_id)
             raise HTTPException(500, "Video comparison failed. Check the backend logs.") from error
+
+    @app.post("/analyses/{session_id}/recompare", response_model=AnalysisSummary)
+    def recompare(request: RecompareRequest, session_id: str = PathParam(..., pattern=SESSION_PATTERN)):
+        source, _ = load_session(UPLOAD_DIR, session_id, settings.analysis_retention_seconds, persist_views=False)
+        new_id = uuid.uuid4().hex
+        return recompare_session(source, UPLOAD_DIR / new_id, new_id, request.mirrorMode,
+                                 settings.analysis_retention_seconds, comparison_config)
 
     @app.get("/analyses/{session_id}", response_model=AnalysisSummary, summary="Retrieve a saved analysis summary",
              responses={404: {"description": "Unknown or unavailable session"}, 410: {"description": "Expired session"}})

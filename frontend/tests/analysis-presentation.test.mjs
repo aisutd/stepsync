@@ -97,3 +97,24 @@ test('compact API summary needs no frame or diagnostic download to render result
   assert.equal(view.coverageText, '480 / 780 frames assessed (61.54%)');
   assert.deepEqual(view.steps, [step]);
 });
+
+
+test('ambiguous mapping withholds candidate scores and feedback but permits automatic conservative coaching', () => {
+  for (const requestedMode of ['auto', 'same', 'mirrored']) {
+    const view = analysisPresentation({ ...completed, alignment: { mirrorSelection: { ambiguous: true, requestedMode } } });
+    assert.equal(view.mappingAmbiguous, true);
+    assert.equal(view.coachingAllowed, true);
+    assert.equal(view.globalScore, null);
+    assert.equal(view.partialScore, null);
+    assert.deepEqual(view.steps, []);
+    assert.equal(view.coverageText, '480 / 780 frames assessed (61.54%)');
+  }
+});
+
+test('manual convention does not force a score without alignment evidence', () => {
+  const view = analysisPresentation({ ...completed, scoreAvailable: false, globalScoreAvailable: false,
+    alignment: { mirrorSelection: { ambiguous: false, requestedMode: 'same' } } });
+  assert.equal(view.mappingAmbiguous, false);
+  assert.equal(view.globalScore, null);
+  assert.deepEqual(view.steps, []);
+});

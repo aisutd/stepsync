@@ -9,6 +9,8 @@ import math
 import re
 
 from .session_store import _artifact
+from .coaching_summary import needs_side_choice
+from .side_independent import validated_facts
 
 MAX_EVENTS = 8
 MAX_FRAMES = 8
@@ -60,6 +62,8 @@ def coverage_statement(summary):
 
 
 def build_context(directory, summary, message="", previous_ids=()):
+    if needs_side_choice(summary):
+        return side_independent_context(summary, message)
     target = requested_time(message)
     parts = body_filter(message)
     side = next((s for s in ("left", "right") if re.search(r"\b" + s + r"\b", message, re.I)), None)
@@ -157,3 +161,25 @@ def build_context(directory, summary, message="", previous_ids=()):
     if len(json.dumps(context).encode()) > MAX_CONTEXT_BYTES:
         raise ValueError("Coaching evidence exceeds the bounded request budget.")
     return context
+
+
+def side_independent_context(summary, message):
+    """An ambiguous convention NEVER borrows the chosen candidate's side facts."""
+    target, parts = requested_time(message), body_filter(message)
+    asks_side = re.search(r"\b(left|right)\b", message, re.I)
+    facts = [fact for fact in validated_facts(summary.get("sideIndependentEvidence"))
+             if not asks_side and (not parts or any(part in fact["label"] for part in parts))
+             and (target is None or abs(fact["start"] - target) <= .1)]
+    limitation = None if facts else (
+        "Individual movement sides could not be identified reliably. I cannot give left/right corrections."
+        if asks_side else "There isn't enough reliably aligned, side-independent evidence for useful movement feedback. "
+        "Try two clips of the same section with your full body visible and a similar camera view.")
+    return {"sessionId": summary["sessionId"], "coverageStatement":
+            "Only bilateral angle ranges on an alignment supported under both mappings are available. "
+            "Individual sides and overall similarity are not assessed by this evidence.",
+            "status": summary.get("status"), "scoreAvailable": False, "movementScore": None,
+            "scoreScope": "none", "globalScoreAvailable": False, "evidenceScope": "side_independent",
+            "alignment": {"mirrorSelection": summary.get("alignment", {}).get("mirrorSelection", {})},
+            "selection": {"requestedTime": target, "bodyParts": sorted(parts),
+                          "note": "Only bilateral ranges on a common, locally validated alignment. No individual-side or timing claims."},
+            "facts": facts, "frames": [], "limitation": limitation}

@@ -2,6 +2,8 @@ import type { AnalysisResult } from './types';
 
 /** Present scope and coverage without inferring success from a legacy number. */
 export function analysisPresentation(result: AnalysisResult) {
+  const selection = result.alignment?.mirrorSelection;
+  const mappingAmbiguous = selection?.ambiguous === true || selection?.decision === 'undetermined';
   let counts: { totalFrames: number; assessedFrames: number; unassessedFrames: number } | null = null;
   const supplied = result.assessment;
   if (supplied && [supplied.totalFrames, supplied.assessedFrames, supplied.unassessedFrames]
@@ -23,7 +25,7 @@ export function analysisPresentation(result: AnalysisResult) {
   const unassessedText = counts ? `${counts.unassessedFrames} frames unassessed. Unassessed movements are not judged.`
     : 'Unassessed movements are not judged.';
   const score = result.movementScore;
-  const hasScore = result.scoreAvailable === true && fraction !== null && fraction > 0
+  const hasScore = !mappingAmbiguous && result.scoreAvailable === true && fraction !== null && fraction > 0
     && typeof score === 'number' && Number.isFinite(score) && score >= 0 && score <= 100;
   const globalScore = hasScore && result.globalScoreAvailable === true
     && result.status === 'completed' && result.scoreScope === 'aligned_observations' ? score : null;
@@ -36,5 +38,10 @@ export function analysisPresentation(result: AnalysisResult) {
   const steps = globalScore !== null || partialScore !== null ? result.steps.filter((step) =>
     step.evidence?.status !== 'unassessed' && Number.isFinite(step.start) && Number.isFinite(step.end)
     && step.start <= step.end && supported.some((span) => step.start >= span.start && step.end <= span.end)) : [];
-  return { globalScore, partialScore, coverageText, unassessedText, steps, supported };
+  const scopeNote = mappingAmbiguous ? 'No overall similarity score is available.'
+    : partialScore !== null ? 'Only supported sections were compared; this is not a whole-video score.'
+      : globalScore !== null ? 'Similarity describes assessed movements only.'
+        : 'No reliable similarity score is available. Unassessed movements are not judged.';
+  return { globalScore, partialScore, coverageText, unassessedText, steps, supported, mappingAmbiguous, scopeNote,
+    coachingAllowed: true };
 }

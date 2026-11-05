@@ -15,6 +15,7 @@ from .temporal import align
 from .comparison_diagnostics import pair_evidence, source_summary, summarize_pairs, frame_records, assessment_segments
 from .partial_comparison import local_support, motion_correlation
 from .side_selection import select_mapping
+from .side_independent import side_independent_evidence
 
 
 @dataclass(frozen=True)
@@ -293,6 +294,8 @@ def compare(reference, practice, config=None):
                        if config.mirror_mode == "auto" else "Side mapping supplied by the user."),
             "selectionEvidence": selection_evidence,
             "candidates": candidate_summaries}}
+    if ambiguous_mirror:
+        result["sideIndependentEvidence"] = side_independent_evidence(reference, practice, candidates, config)
     if not path:
         return abstain("No time map satisfies the configured timing constraints.", "uncertain_alignment")
     pair_records = [pair_evidence(reference[i], practice[j], config, mirrored) for i, j in path]

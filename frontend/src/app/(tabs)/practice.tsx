@@ -11,7 +11,7 @@ import { colors } from '@/theme';
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { reference, practice, setReference, setPractice, setResult } = useSession();
+  const { reference, practice, setReference, setPractice, setResult, beginResultRequest } = useSession();
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -20,14 +20,17 @@ export default function HomeScreen() {
 
   async function onAnalyze() {
     if (!reference || !practice) return;
+    const request = beginResultRequest();
     setLoading(true);
     setError(null);
     setProgress(null);
     try {
-      setResult(await analyze(reference, practice, setProgress));
-      router.push('/results');
+      const next = await analyze(reference, practice, progress => {
+        if (request.isCurrent()) setProgress(progress);
+      });
+      if (request.commit(next)) router.push('/results');
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Something went wrong.');
+      if (request.isCurrent()) setError(e instanceof Error ? e.message : 'Something went wrong.');
     } finally {
       setLoading(false);
       setProgress(null);

@@ -1,9 +1,9 @@
-import { useState } from 'react';
-import { Redirect, useRouter } from 'expo-router';
+import { useCallback, useRef, useState } from 'react';
+import { Redirect, useFocusEffect, useRouter } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { analyze } from '@/api/client';
+import { analysisDiagnosticsUrl, retryAnalysis } from '@/api/client';
 import type { MirrorMode, StepFeedback } from '@/api/types';
 import { analysisPresentation } from '@/api/analysis-presentation';
 import { CoachingChat } from '@/components/coaching-chat';
@@ -11,31 +11,53 @@ import { useSession } from '@/state/session';
 import { colors, scoreColor } from '@/theme';
 
 export default function ResultsScreen() {
-  const { reference, practice, result, setResult } = useSession();
+  const { reference, practice, result, beginResultRequest } = useSession();
   const router = useRouter();
+  const retryInFlight = useRef<object | null>(null);
+  const focused = useRef(false);
+  const [showTechnical, setShowTechnical] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [retryProgress, setRetryProgress] = useState<number | null>(null);
   const [retryError, setRetryError] = useState<string | null>(null);
   const player = useVideoPlayer(practice?.uri ?? null);
+  useFocusEffect(useCallback(() => {
+    focused.current = true;
+    setRetrying(false);
+    setRetryError(null);
+    setRetryProgress(null);
+    return () => {
+      focused.current = false;
+      retryInFlight.current = null;
+    };
+  }, []));
 
   if (!practice || !result) return <Redirect href="/" />;
   const presentation = analysisPresentation(result);
 
   const mirrorSelection = result.alignment?.mirrorSelection;
-  const showMirrorRetry = mirrorSelection?.ambiguous === true || mirrorSelection?.decision === 'undetermined'
-    || (mirrorSelection?.requestedMode !== undefined && mirrorSelection.requestedMode !== 'auto');
 
-  async function retry(mirrorMode: MirrorMode) {
-    if (!reference || !practice || retrying) return;
+
+  async function retry(mirrorMode: Exclude<MirrorMode, 'auto'>) {
+    if (!result || !focused.current || retryInFlight.current) return;
+    const token = {};
+    retryInFlight.current = token;
+    const request = beginResultRequest();
+    const visible = () => focused.current && retryInFlight.current === token;
     setRetrying(true);
     setRetryError(null);
     setRetryProgress(null);
     try {
-      setResult(await analyze(reference, practice, setRetryProgress, mirrorMode));
+      const next = await retryAnalysis(result.sessionId, mirrorMode, reference, practice, progress => {
+        if (visible() && request.isCurrent()) setRetryProgress(progress);
+      });
+      if (visible()) request.commit(next);
     } catch (e) {
-      setRetryError(e instanceof Error ? e.message : 'Could not retry analysis.');
+      if (visible() && request.isCurrent()) setRetryError(e instanceof Error ? e.message : 'Could not retry analysis.');
     } finally {
-      setRetrying(false);
+      if (visible()) {
+        retryInFlight.current = null;
+        setRetrying(false);
+      }
     }
   }
 
@@ -44,93 +66,71 @@ export default function ResultsScreen() {
     player.play();
   }
 
+  const sideChoice = (
+    <View style={styles.sideChoice}>
+      <Text accessibilityRole="header" style={styles.overallLabel}>
+        Optional movement sides
+      </Text>
+      <Text style={styles.feedback}>Automatic matching is the default. If you know your intended convention, you can refine this comparison using saved pose measurements.</Text>
+      <Text style={styles.hint}>Same sides: your left follows the dancer's left. Mirror movements: your left follows their right.</Text>
+      <Text style={styles.hint}>Choose your intention, not the higher score. Your choice does not guarantee reliable alignment.</Text>
+      <Pressable accessibilityRole="button" disabled={retrying} onPress={() => void retry('same')} style={styles.retry}>
+        <Text style={styles.feedback}>Same sides</Text>
+      </Pressable>
+      <Pressable accessibilityRole="button" disabled={retrying} onPress={() => void retry('mirrored')} style={styles.retry}>
+        <Text style={styles.feedback}>Mirror movements</Text>
+      </Pressable>
+    </View>
+  );
+  const similarity = presentation.globalScore ?? presentation.partialScore;
+
   return (
-    <FlatList
-      data={presentation.steps}
-      keyExtractor={(step) => step.id}
-      contentContainerStyle={styles.container}
-      ListHeaderComponent={
-        <View style={styles.header}>
-          <VideoView player={player} style={styles.video} contentFit="contain" nativeControls />
-          <View style={styles.overall}>
-            <Text style={styles.overallLabel}>
-              {presentation.globalScore !== null ? 'Assessed movement similarity' : 'Analysis-wide comparison unavailable'}
-            </Text>
-            {presentation.globalScore !== null && (
-              <Text style={[styles.overallScore, { color: scoreColor(presentation.globalScore) }]}>
-                {presentation.globalScore.toFixed(2)}
-              </Text>
-            )}
-          </View>
-          <Text style={styles.coverage}>{presentation.coverageText}</Text>
-          {result.alignment?.mirrorSelection?.selectedMapping && <Text style={styles.hint}>
-            Side matching: {result.alignment.mirrorSelection.selectedMapping === 'same' ? 'Same sides' : 'Mirrored sides'}
-            {result.alignment.mirrorSelection.requestedMode === 'auto' ? ' (automatic)' : ' (manual)'}
-          </Text>}
-          <Text style={styles.hint}>{presentation.unassessedText}</Text>
-          {presentation.partialScore !== null && (
-            <View style={styles.partial}>
-              <Text style={styles.overallLabel}>Assessed segments only</Text>
-              <Text style={styles.partialScore}>Segment similarity: {presentation.partialScore.toFixed(2)}</Text>
-              <Text style={styles.hint}>This score applies only to the supported segments below.</Text>
-              {presentation.supported.map((span, index) => (
-                <Text key={index} style={styles.hint}>{span.start.toFixed(3)}s to {span.end.toFixed(3)}s</Text>
-              ))}
-            </View>
-          )}
-          <Text style={styles.hint}>Similarity uses supported joint measurements, not every movement in the video.</Text>
-          {presentation.globalScore === null && presentation.partialScore === null && (
-            <Text style={styles.overallLabel}>Could not confidently assess these videos</Text>
-          )}
-          {result.reason ? <Text style={styles.hint}>{result.reason}</Text> : null}
-          {result.warnings?.filter((warning) => warning !== result.reason).map((warning, index) => <Text key={index} style={styles.hint}>{warning}</Text>)}
-          {showMirrorRetry && reference && (
-            <View style={styles.partial}>
-              <Text style={styles.overallLabel}>Check movement sides</Text>
-              {mirrorSelection?.ambiguous && mirrorSelection.reason && <Text style={styles.hint}>{mirrorSelection.reason}</Text>}
-              <Text style={styles.hint}>Automatic side matching may be uncertain. Choose the intended convention: same matches left to left; mirrored matches your left to the right side of the reference dancer. This setting does not guarantee a reliable comparison.</Text>
-              {mirrorSelection?.requestedMode && <Text style={styles.hint}>Current setting: {mirrorSelection.requestedMode}</Text>}
-              <Pressable accessibilityRole="button" disabled={retrying} onPress={() => void retry('same')} style={styles.retry}>
-                <Text style={styles.feedback}>Retry: same sides</Text>
-              </Pressable>
-              <Pressable accessibilityRole="button" disabled={retrying} onPress={() => void retry('mirrored')} style={styles.retry}>
-                <Text style={styles.feedback}>Retry: mirrored sides</Text>
-              </Pressable>
-              <Text style={styles.hint}>Retry uploads both selected videos and runs analysis again.</Text>
-            </View>
-          )}
-          {retrying && <View accessibilityLiveRegion="polite" style={styles.partial}>
-            <ActivityIndicator color={colors.primary} />
-            <Text style={styles.feedback}>{retryProgress === null ? 'Preparing videos...' : retryProgress < 1 ? `Uploading ${Math.round(retryProgress * 100)}%` : 'Analyzing...'} Keep this page open.</Text>
-            <Text style={styles.hint}>The results below are from the previous analysis until this retry finishes.</Text>
-          </View>}
-          {retryError && <Text accessibilityRole="alert" style={styles.error}>{retryError} The previous results remain below.</Text>}
-          <Pressable accessibilityRole="button" disabled={retrying} onPress={() => router.replace('/practice')} style={styles.retry}>
-            <Text style={styles.feedback}>Choose different videos</Text>
-          </Pressable>
-          {presentation.steps.length > 0 && <Text style={styles.hint}>Tap a reported difference to jump to it in your video.</Text>}
-        </View>
-      }
-      ListEmptyComponent={
-        <Text style={styles.hint}>No supported movement differences to display. Unassessed movements have no correctness result.</Text>
-      }
-      ListFooterComponent={result.sessionId ? <CoachingChat key={result.sessionId} sessionId={result.sessionId} disabled={retrying} /> : null}
-      renderItem={({ item }) => (
-        <Pressable
-          onPress={() => jumpTo(item)}
-          style={({ pressed }) => [styles.step, pressed && styles.pressed]}
-        >
-          <View style={styles.stepTop}>
-            <Text style={styles.stepLabel}>{item.label}</Text>
-            <Text style={styles.time}>
-              {formatTime(item.start)} to {formatTime(item.end)}
-            </Text>
-            <Text style={[styles.score, { color: scoreColor(item.score) }]}>{item.score}</Text>
-          </View>
-          <Text style={styles.feedback}>{item.feedback}</Text>
-        </Pressable>
-      )}
-    />
+    <ScrollView contentContainerStyle={styles.container}>
+      <Text accessibilityRole="header" style={styles.title}>Your dance check-in</Text>
+      {retrying && <View accessibilityLiveRegion="polite" style={styles.partial}>
+        <ActivityIndicator color={colors.primary} />
+        <Text style={styles.feedback}>{retryProgress === null ? 'Comparing saved movements...' : retryProgress < 1 ? `Uploading ${Math.round(retryProgress * 100)}%` : 'Analyzing...'} Keep this page open.</Text>
+        <Text style={styles.hint}>Your previous results stay here until the comparison finishes.</Text>
+      </View>}
+      {retryError && <Text accessibilityRole="alert" style={styles.error}>{retryError} Your previous results are saved.</Text>}
+      {result.sessionId
+        ? <CoachingChat key={result.sessionId} sessionId={result.sessionId} disabled={retrying} technicalDetails={showTechnical} />
+        : <Text style={styles.hint}>Connect to the backend to receive saved, evidence-based coaching.</Text>}
+      <View style={styles.partial}>
+        {similarity !== null && <View style={styles.overall}>
+          <Text style={styles.overallLabel}>{presentation.partialScore !== null ? 'Supported-section similarity' : 'Movement similarity'}</Text>
+          <Text style={[styles.overallScore, { color: scoreColor(similarity) }]}>{similarity.toFixed(1)} / 100</Text>
+        </View>}
+        <Text style={styles.hint}>{presentation.scopeNote}</Text>
+      </View>
+      <Pressable accessibilityRole="button" accessibilityState={{ expanded: showTechnical }} disabled={retrying}
+        onPress={() => setShowTechnical(!showTechnical)} style={styles.retry}>
+        <Text style={styles.feedback}>{showTechnical ? 'Hide technical details' : 'View technical details'}</Text>
+      </Pressable>
+      {showTechnical && <View style={styles.details}>
+        <Text accessibilityRole="header" style={styles.overallLabel}>Analysis details</Text>
+        <Text selectable style={styles.hint}>{presentation.coverageText}</Text>
+        <Text style={styles.hint}>{presentation.unassessedText}</Text>
+        {mirrorSelection?.requestedMode && <Text style={styles.hint}>Side setting: {mirrorSelection.requestedMode}; selected mapping: {mirrorSelection.selectedMapping ?? 'unconfirmed'}</Text>}
+        {result.reason && <Text selectable style={styles.hint}>{result.reason}</Text>}
+        {result.warnings?.filter(warning => warning !== result.reason).map((warning, index) => <Text selectable key={index} style={styles.hint}>{warning}</Text>)}
+        {sideChoice}
+        <VideoView player={player} style={styles.video} contentFit="contain" nativeControls />
+        {presentation.supported.map((span, index) => <Text key={index} style={styles.hint}>Supported span: {span.start.toFixed(3)}s to {span.end.toFixed(3)}s</Text>)}
+        {presentation.steps.map(step => <Pressable key={step.id} accessibilityRole="button" onPress={() => jumpTo(step)} style={styles.step}>
+          <Text style={styles.overallLabel}>{step.label}</Text>
+          <Text style={styles.hint}>{formatTime(step.start)} to {formatTime(step.end)}; measured similarity: {step.score}</Text>
+          <Text selectable style={styles.feedback}>{step.feedback}</Text>
+        </Pressable>)}
+        {result.sessionId && <Pressable accessibilityRole="link" onPress={() => void Linking.openURL(analysisDiagnosticsUrl(result.sessionId!))} style={styles.retry}>
+          <Text style={styles.feedback}>Download full diagnostic JSON</Text>
+        </Pressable>}
+        <Text style={styles.hint}>Full measurements and paginated frame records remain available through the backend API. Downloads are requested only when you open them.</Text>
+      </View>}
+      <Pressable accessibilityRole="button" disabled={retrying} onPress={() => router.replace('/practice')} style={styles.retry}>
+        <Text style={styles.feedback}>Compare new videos</Text>
+      </Pressable>
+    </ScrollView>
   );
 }
 
@@ -140,13 +140,15 @@ function formatTime(seconds: number): string {
 }
 
 const styles = StyleSheet.create({
-  container: { padding: 20, gap: 12 },
-  header: { gap: 14, marginBottom: 4 },
+  container: { padding: 20, paddingBottom: 40, gap: 20, width: '100%', maxWidth: 720, alignSelf: 'center' },
+  title: { color: colors.text, fontSize: 28, fontWeight: '700' },
+  details: { gap: 14, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 16 },
   video: { width: '100%', aspectRatio: 16 / 9, borderRadius: 14, backgroundColor: '#000' },
-  overall: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' },
+  overall: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, alignItems: 'baseline', justifyContent: 'space-between' },
   overallLabel: { color: colors.text, fontSize: 18, fontWeight: '600', flexShrink: 1 },
-  overallScore: { fontSize: 34, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  overallScore: { fontSize: 26, fontWeight: '700', fontVariant: ['tabular-nums'] },
   coverage: { color: colors.text, fontSize: 15, fontWeight: '600' },
+  sideChoice: { borderWidth: 2, borderColor: colors.primary, backgroundColor: colors.surface, borderRadius: 14, padding: 16, gap: 12 },
   partial: { backgroundColor: colors.surface, borderRadius: 14, padding: 14, gap: 8 },
   partialScore: { color: colors.text, fontSize: 18, fontWeight: '600' },
   retry: { padding: 12, borderRadius: 10, backgroundColor: colors.pill },

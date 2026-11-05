@@ -28,6 +28,58 @@ export async function analyze(
   return postForm<AnalysisResult>(`${API_URL}/analyze`, body, onProgress);
 }
 
+/** Comparison-only retry. Only legacy sessions missing CSVs fall back to uploads. */
+const pendingRetries = new Map<string, Promise<AnalysisResult>>();
+
+export function retryAnalysis(
+  sessionId: string | undefined, mirrorMode: Exclude<MirrorMode, 'auto'>,
+  reference?: PickedVideo | null, practice?: PickedVideo | null,
+  onProgress?: (fraction: number) => void,
+): Promise<AnalysisResult> {
+  if (!sessionId) {
+    if (reference && practice) return analyze(reference, practice, onProgress, mirrorMode);
+    return Promise.reject(new Error('Select the original videos to retry this older analysis.'));
+  }
+  const key = `${sessionId}:${mirrorMode}`;
+  const pending = pendingRetries.get(key);
+  if (pending) return pending;
+  const request = recompareAnalysis(sessionId, mirrorMode).catch((error: unknown) => {
+    if (error instanceof MissingPoseDataError && reference && practice) {
+      return analyze(reference, practice, onProgress, mirrorMode);
+    }
+    throw error;
+  }).finally(() => pendingRetries.delete(key));
+  pendingRetries.set(key, request);
+  return request;
+}
+
+class MissingPoseDataError extends Error {}
+
+export async function recompareAnalysis(sessionId: string, mirrorMode: Exclude<MirrorMode, 'auto'>): Promise<AnalysisResult> {
+  if (mirrorMode !== 'same' && mirrorMode !== 'mirrored') throw new Error('Choose same or mirrored sides.');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120_000);
+  try {
+    const response = await fetch(`${analysisUrl(sessionId)}/recompare`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ mirrorMode }), signal: controller.signal,
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      if (response.status === 409 && data.detail?.code === 'pose_data_missing') {
+        throw new MissingPoseDataError(data.detail.message);
+      }
+      throw new Error(typeof data.detail === 'string' ? data.detail : data.error?.message ?? `Recomparison failed (${response.status}).`);
+    }
+    return data as AnalysisResult;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('Comparison timed out. Your previous results remain available.');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function analysisUrl(sessionId: string): string {
   if (!API_URL) throw new Error('Saved analysis details require a connected backend.');
   if (!/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Invalid analysis session ID.');

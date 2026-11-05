@@ -393,7 +393,37 @@ The results screen displays scope and assessment coverage for completed and
 partial summaries. Full frame evidence remains available through the paginated
 endpoint, and complete diagnostic JSON through the explicit download endpoint.
 
-To replay any saved pose CSV pair without running MediaPipe again, from `backend`:
+The results screen keeps automatic matching as its default. When side selection is
+ambiguous, coaching still starts automatically. Only side-independent bilateral
+angle ranges on a common, reliable alignment can be used; individual-side claims
+and an overall similarity score are withheld. **Same sides** (left follows left)
+and **Mirror movements** (left follows right) are optional overrides inside
+**View technical details**. Higher coverage does not establish the intended
+convention, and a manual choice does not bypass alignment confidence checks.
+
+For ambiguous mappings, `sideIndependentEvidence` records sorted angle ranges
+across both limbs at observed moments. Both candidate mappings must pass the
+existing bracketing, viewpoint, shared-angle, confidence, span-length, and motion
+checks and agree on the exact reference sample. Both range endpoints are retained;
+opposing errors cannot average away. This coaching evidence never changes the
+existing score, per-side frame comparisons, or thresholds. If the common evidence
+is insufficient, the result is a short recording/alignment limitation, not invented
+feedback. Gemini receives only validated structured facts, never videos, images,
+or frame records. Older analyses without this additive evidence remain limited;
+run a fresh analysis or an optional saved-pose recomparison to obtain new evidence.
+
+`POST /analyses/{session_id}/recompare` accepts only
+`{"mirrorMode":"same"}` or `{"mirrorMode":"mirrored"}`. It compares the saved
+`reference/pose_data.csv` and `practice/pose_data.csv` without uploading videos or
+running pose extraction. Each request saves a new session with independent pose
+CSVs, summary, frame records, and diagnostics; existing completed results stay
+unchanged. The UI preserves previous results while loading and on errors. Missing
+CSVs return 409 (`pose_data_missing`); the UI falls back to uploading the selected
+videos for those older sessions. Unknown sessions return 404 and expired sessions
+return 410, without silently retrying uploads. Recomparison does not copy coaching
+history; coaching for the new session uses its own comparison evidence.
+
+For a standalone CLI replay, from `backend`:
 
 ```powershell
 .\venv\Scripts\python.exe -m app.recompare `
@@ -529,8 +559,9 @@ directories; they never download YouTube videos or require system FFmpeg. The lo
 
 ## Configurable provisional defaults
 
-Set environment variables before starting the server; restart after changing.
-There is no dotenv loader or additional settings framework.
+The backend automatically loads `backend/.env` using python-dotenv before reading
+settings, regardless of the terminal working directory. Existing process environment
+variables take precedence (including empty values). Restart the backend after changes.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -728,7 +759,7 @@ python3 -m venv .venv
 2. Open the dashboard's **API Keys** page and choose **Create API key**.
 3. Select a project, or create one if offered. If your existing Cloud project
    is missing, open **Projects**, select **Import projects**, and import it first.
-4. Copy the newly created key and enter it at the masked PowerShell prompt below.
+4. Copy the newly created key into your local `backend/.env` as described below.
    Do not paste it into chat, frontend code, or a tracked file.
 
 See Google's [current key setup instructions](https://ai.google.dev/gemini-api/docs/api-key)
@@ -739,6 +770,32 @@ specific version. Availability and quotas depend on your Google project; the
 app handles provider errors without removing regular comparison results.
 
 ## Configure and test coaching
+
+The results page leads with a short practice summary: an impression, up to two
+supported strengths, up to two improvements, and one practical tip. Missing
+evidence is stated rather than filled with praise or invented findings. The
+existing coaching endpoint adds a `summary` object to its conversation response;
+messages, citations, history, and all analysis endpoints remain available.
+Gemini selects evidence IDs and drills through the existing structured-output
+request. The server validates them and renders the summary using saved facts.
+The displayed sentences use plain-English templates, with approximate timestamps
+and one short limitation note at the end. A `gemini` message source means the
+evidence/drill selection came from Gemini; it does not mean Gemini wrote the final
+sentences. An `evidence` source is a local limitation when measurements cannot
+support feedback. Provider failures are reported as errors, not silently replaced
+with invented coaching. Technical details explain this distinction.
+Older cached summaries are restyled from their saved citations on read, without
+another API call, changing measurements, or rewriting coaching history.
+Only allow-listed structured evidence is sent to Gemini, without videos, images,
+raw frames, pose CSVs, or the full diagnostic JSON.
+
+**View technical details** reveals assessment counts, scope, supported spans,
+measured movement feedback, video review, coaching citations, and a full diagnostic
+download. These remain collapsed by default. Follow-up questions are optional.
+Cached coaching is presented without another provider request or rewriting saved
+history. Side ambiguity permits only validated bilateral evidence, without requiring
+manual confirmation; insufficient alignment never becomes a confident movement
+claim or invented score.
 
 The results screen automatically requests an initial coaching summary once the
 compact comparison has arrived. It uses `POST /analyses/{sessionId}/coaching`
@@ -751,16 +808,51 @@ accepted from the client. Coaching lives in `coaching.json` alongside immutable
 analysis artifacts and follows the existing session expiry (404 missing, 410
 expired). No pose extraction, comparison, score, threshold or mirror decision changes.
 
-Install backend dependencies, then set the key in the **backend terminal only**.
-From the project root in PowerShell, this avoids putting the key in shell history:
+From the project root in a Windows PowerShell terminal (including VS Code's
+**Terminal > New Terminal**), install dependencies and create your local file once:
 
 ```powershell
-backend/venv/Scripts/python.exe -m pip install -r backend/requirements.txt
-$geminiKeyInput = Read-Host "Gemini API key" -AsSecureString
-$env:GEMINI_API_KEY = [System.Net.NetworkCredential]::new('', $geminiKeyInput).Password
-$env:GEMINI_MODEL = 'gemini-flash-latest' # optional; override with an available compatible model
+.\backend\venv\Scripts\python.exe -m pip install -r backend/requirements.txt
+if (-not (Test-Path backend/.env)) { Copy-Item backend/.env.example backend/.env }
+notepad backend/.env
+```
+
+In VS Code, you can instead open `backend/.env` directly in the editor. Save:
+
+```dotenv
+GEMINI_API_KEY=your_actual_api_key_here
+GEMINI_MODEL=gemini-flash-latest
+```
+
+Replace the key placeholder with your own key; the model can stay as shown.
+`backend/.env` is ignored by Git; `backend/.env.example` is the safe template.
+Keep the key only in the backend file, never in frontend settings or chat.
+The backend loads this file automatically on startup, including after restarting
+PowerShell or VS Code. No terminal export, activation, or VS Code extension is needed.
+Existing terminal/system environment variables take precedence over the file.
+If you previously set these in this terminal and want to use the file, remove
+only those process overrides before starting:
+
+```powershell
+Remove-Item Env:GEMINI_API_KEY, Env:GEMINI_MODEL -ErrorAction SilentlyContinue
+```
+
+Start the backend from the project root:
+
+```powershell
 .\run-local.ps1 -Port 8001
 ```
+
+Restart the backend after editing `.env`; automatic code reload does not watch
+this file. In a second terminal, check startup without printing your key:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8001/health
+```
+
+Expect `status: ok`. This checks server startup, not Gemini credentials. To verify
+the key with a real provider request, run a video comparison below and ask a new
+coaching question. A new question avoids reusing a cached initial summary.
 
 Start the frontend in a separate terminal with
 `$env:EXPO_PUBLIC_API_URL = 'http://127.0.0.1:8001'`, then `cd frontend` and
@@ -794,14 +886,15 @@ npm.cmd test
 npm.cmd run typecheck
 ```
 
-`backend/.env.example` documents variables but is **not automatically loaded**.
+`backend/.env.example` is a template; copy it to `backend/.env` for automatic loading.
 Never put the key in an `EXPO_PUBLIC_*` variable, frontend file, request body, or
 tracked file. Local `.env` files are ignored. No key is returned to the browser.
 Without a key, comparison still works and the coach shows setup guidance. Retry
 coaching after configuring/restarting the backend; videos need not be reuploaded.
 
 The official [Google Gen AI Python SDK](https://googleapis.github.io/python-genai/)
-uses structured output to select at most three evidence IDs and appropriate drills.
+uses structured output to select up to two strengths, two improvements, and one
+practice tip for a summary, or at most three evidence points for a follow-up.
 The backend validates those IDs, match/difference status, timing eligibility, and
 drill type. It renders factual sentences from saved engine events and angle
 measurements, and practice ideas from bounded templates. **This MVP deliberately
@@ -847,11 +940,13 @@ The backend explicitly uses Gemini Developer API (`vertexai=False`), passes
 generation call. Authentication uses the SDK's `x-goog-api-key` header. Another
 `GOOGLE_API_KEY` or Vertex environment setting cannot override those explicit
 choices. `run-local.ps1` inherits its terminal environment without replacing
-either Gemini variable; it does not load a `.env` file. Setting variables in a
-different terminal cannot change an already-running server's environment.
+either Gemini variable. The FastAPI app loads `backend/.env` with
+`override=False` before reading settings. Setting variables in a different
+terminal cannot change an already-running server's environment.
 
 After changing code or environment, stop the existing backend with Ctrl+C and
-restart it from the terminal where your working key is set:
+restart it after saving your working key in `backend/.env`. Optional terminal
+overrides still work:
 
 ```powershell
 $env:GEMINI_MODEL = 'gemini-3.5-flash-lite'

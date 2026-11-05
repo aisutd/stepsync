@@ -3,6 +3,14 @@ import numpy as np
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolated_local_environment(tmp_path, monkeypatch):
+    # App factories must never reload a developer's real credentials in tests.
+    monkeypatch.setattr("app.main.BACKEND_ENV_PATH", tmp_path / "missing.env")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+
+
 @pytest.fixture
 def video(tmp_path):
     path = tmp_path / "sample.mp4"

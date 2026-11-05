@@ -3,6 +3,14 @@
 
 export type MirrorMode = 'auto' | 'same' | 'mirrored';
 
+export type CoachingSummary = {
+  impression: string;
+  strengths: string[];
+  improvements: string[];
+  practiceTip: string | null;
+  note: string | null;
+};
+
 export type CoachingMessage = {
   id: string;
   role: 'user' | 'assistant';
@@ -13,6 +21,9 @@ export type CoachingMessage = {
 };
 
 export type CoachingConversation = {
+  initialReady?: boolean;
+  initialMessageId?: string | null;
+  summary?: CoachingSummary | null;
   sessionId: string;
   enabled: boolean;
   coverageStatement: string;
@@ -42,6 +53,7 @@ export type StepFeedback = {
 };
 
 export type AnalysisResult = {
+  sideIndependentEvidence?: Record<string, unknown> | null;
   /** Set by the backend so a result can be looked up later. */
   sessionId?: string;
   overallScore: number;
