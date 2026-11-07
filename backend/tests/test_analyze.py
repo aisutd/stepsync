@@ -1,4 +1,4 @@
-"""POST /analyze: the phone app's upload endpoint, scored with Satwik's DTW comparison."""
+"""POST /analyze: the phone app's upload endpoint, integrated with Rodrigo's persisted comparison pipeline."""
 
 import shutil
 from pathlib import Path
@@ -8,6 +8,9 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 from app.config import Settings
+from app.comparison import ComparisonConfig
+import csv
+import sys
 from app.main import create_app
 from app.pose_processing import PoseArtifacts
 
@@ -31,12 +34,13 @@ class FakePose:
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
+def client(tmp_path, monkeypatch, video):
+    monkeypatch.setattr(sys.modules[__name__], "VIDEO", video.read_bytes())
     monkeypatch.setattr(main, "UPLOAD_DIR", tmp_path / "uploads")
     settings = Settings(data_directory=tmp_path / "data")
     settings.video_directory.mkdir(parents=True)
     pose = FakePose()
-    with TestClient(create_app(settings, pose_runner=pose)) as client:
+    with TestClient(create_app(settings, pose_runner=pose, comparison_config=ComparisonConfig(mirror_mode="same"))) as client:
         client.settings = settings
         client.pose = pose
         yield client
@@ -51,10 +55,13 @@ def test_two_uploaded_files(client):
     response = client.post("/analyze", files=files)
     assert response.status_code == 200
     body = response.json()
-    assert body["steps"] and "sessionId" in body
-    # Same pose data on both sides: a perfect match.
-    assert body["overallScore"] == 100 and body["movementScore"] == 100 and body["timingScore"] == 100
-    assert {"start", "end", "score", "feedback", "referenceStart", "referenceEnd"} <= set(body["steps"][0])
+    assert "sessionId" in body
+    assert "frameComparisons" not in body
+    assert body["movementScore"] == pytest.approx(100)
+    assert body["scoreAvailable"]
+    assert body["overallScore"] == body["movementScore"]
+    assert "timingScore" not in body
+    assert client.get(body["links"]["summary"]).json() == body
     saved = main.UPLOAD_DIR / body["sessionId"]
     assert (saved / "reference.mp4").is_file() and (saved / "practice.mov").is_file()
 
@@ -83,9 +90,15 @@ def test_scores_one_tutorial_step(client):
     (client.settings.video_directory / "My Dance.mp4").write_bytes(VIDEO)
     data = {"reference_video": "My Dance.mp4", "step_start_ms": "2000", "step_end_ms": "4500"}
     body = client.post("/analyze", files=practice_file(), data=data).json()
-    # Only the step's part of the reference is compared, so its sections stay inside 2.0 to 4.5 s.
-    assert all(2.0 <= s["referenceStart"] and s["referenceEnd"] <= 4.5 for s in body["steps"])
-    assert body["referenceSamples"] < body["practiceSamples"]
+    saved = main.UPLOAD_DIR / body["sessionId"]
+    with (saved / "reference" / "pose_data.csv").open() as source:
+        times = [int(row["timestamp_ms"]) for row in csv.DictReader(source)]
+    assert times and all(2000 <= time < 4500 for time in times)
+    retried = client.post(f"/analyses/{body['sessionId']}/recompare", json={"mirrorMode": "same"})
+    assert retried.status_code == 200, retried.text
+    retry_dir = main.UPLOAD_DIR / retried.json()["sessionId"]
+    assert (retry_dir / "reference" / "pose_data.csv").read_bytes() == (saved / "reference" / "pose_data.csv").read_bytes()
+
 
 
 @pytest.mark.parametrize("data, message", [
@@ -111,8 +124,10 @@ def test_no_dancer_found(client, monkeypatch):
     with TestClient(create_app(settings, pose_runner=empty_pose)) as other:
         files = {**practice_file(), "reference": ("ref.mp4", VIDEO, "video/mp4")}
         response = other.post("/analyze", files=files)
-    assert response.status_code == 422
-    assert "full-body" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json()["status"] == "insufficient_data"
+    assert response.json()["scoreAvailable"] is False
+    assert response.json()["movementScore"] is None
 
 
 def test_unknown_youtube_filename(client):

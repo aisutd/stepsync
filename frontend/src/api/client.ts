@@ -3,11 +3,11 @@ import { Platform } from 'react-native';
 import { supabase, supabaseConfigured } from '@/lib/supabase';
 
 import { mockAnalyze } from './mock';
-import type { AnalysisResult, DanceDetail, DanceStep, DanceSummary, PickedVideo, YouTubeImportResponse } from './types';
+import type { AnalysisResult, CoachingConversation, FrameComparisonPage, MirrorMode, DanceDetail, DanceStep, DanceSummary, PickedVideo, YouTubeImportResponse } from './types';
 
-const API_URL = process.env.EXPO_PUBLIC_API_URL;
+const API_URL = (process.env.EXPO_PUBLIC_API_URL || (Platform.OS === 'web' ? 'http://127.0.0.1:8000' : undefined))?.replace(/\/+$/, '');
 
-/** True until EXPO_PUBLIC_API_URL is set in .env. */
+/** Browser sessions use the local backend; native sessions need EXPO_PUBLIC_API_URL. */
 export const usingMockApi = !API_URL;
 
 /**
@@ -21,10 +21,12 @@ export async function analyze(
   onProgress?: (fraction: number) => void,
   /** Score against just this part of the reference (one tutorial step). */
   step?: { start_ms: number; end_ms: number },
+  mirrorMode: MirrorMode = 'auto',
 ): Promise<AnalysisResult> {
   if (!API_URL) return mockAnalyze(practice);
 
   const body = new FormData();
+  body.append('mirror_mode', mirrorMode);
   const savedYouTube = reference.youtube?.serverFilename;
   if (savedYouTube) body.append('reference_video', savedYouTube);
   else await appendVideo(body, 'reference', reference);
@@ -197,4 +199,113 @@ export async function updateSteps(
   const text = await response.text();
   if (!response.ok) throw new Error(errorMessage(text, response.status));
   return (JSON.parse(text) as { steps: DanceStep[] }).steps;
+}
+
+/** Comparison-only retry. Only legacy sessions missing CSVs fall back to uploads. */
+const pendingRetries = new Map<string, Promise<AnalysisResult>>();
+
+export function retryAnalysis(
+  sessionId: string | undefined, mirrorMode: Exclude<MirrorMode, 'auto'>,
+  reference?: PickedVideo | null, practice?: PickedVideo | null,
+  onProgress?: (fraction: number) => void,
+  step?: { start_ms: number; end_ms: number },
+): Promise<AnalysisResult> {
+  if (!sessionId) {
+    if (reference && practice) return analyze(reference, practice, onProgress, step, mirrorMode);
+    return Promise.reject(new Error('Select the original videos to retry this older analysis.'));
+  }
+  const key = `${sessionId}:${mirrorMode}`;
+  const pending = pendingRetries.get(key);
+  if (pending) return pending;
+  const request = recompareAnalysis(sessionId, mirrorMode).catch((error: unknown) => {
+    if (error instanceof MissingPoseDataError && reference && practice) {
+      return analyze(reference, practice, onProgress, step, mirrorMode);
+    }
+    throw error;
+  }).finally(() => pendingRetries.delete(key));
+  pendingRetries.set(key, request);
+  return request;
+}
+
+class MissingPoseDataError extends Error {}
+
+export async function recompareAnalysis(sessionId: string, mirrorMode: Exclude<MirrorMode, 'auto'>): Promise<AnalysisResult> {
+  if (mirrorMode !== 'same' && mirrorMode !== 'mirrored') throw new Error('Choose same or mirrored sides.');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120_000);
+  try {
+    const response = await fetch(`${analysisUrl(sessionId)}/recompare`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ mirrorMode }), signal: controller.signal,
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      if (response.status === 409 && data.detail?.code === 'pose_data_missing') {
+        throw new MissingPoseDataError(data.detail.message);
+      }
+      throw new Error(typeof data.detail === 'string' ? data.detail : data.error?.message ?? `Recomparison failed (${response.status}).`);
+    }
+    return data as AnalysisResult;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('Comparison timed out. Your previous results remain available.');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function analysisUrl(sessionId: string): string {
+  if (!API_URL) throw new Error('Saved analysis details require a connected backend.');
+  if (!/^[0-9a-f]{32}$/.test(sessionId)) throw new Error('Invalid analysis session ID.');
+  return `${API_URL.replace(/\/+$/, '')}/analyses/${sessionId}`;
+}
+
+/** Reads saved results; these requests never upload or analyze videos. */
+export async function getAnalysis(sessionId: string): Promise<AnalysisResult> {
+  return getAnalysisJson<AnalysisResult>(analysisUrl(sessionId));
+}
+
+export async function getCoaching(sessionId: string): Promise<CoachingConversation> {
+  return getAnalysisJson<CoachingConversation>(`${analysisUrl(sessionId)}/coaching`);
+}
+
+/** Only session ID and question go to our backend; provider credentials stay there. */
+export async function askCoach(sessionId: string, message?: string, requestId = 'initial'): Promise<CoachingConversation> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45_000);
+  try {
+    const response = await fetch(`${analysisUrl(sessionId)}/coaching`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ message, requestId }), signal: controller.signal,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail ?? data.error?.message ?? 'Coaching is unavailable. Your comparison results are still available.');
+    return data as CoachingConversation;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('AI coaching timed out. Retry coaching; your comparison results are still available.');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function getAnalysisFrames(sessionId: string, offset = 0, limit = 50): Promise<FrameComparisonPage> {
+  if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error('Use a nonnegative offset and a page size from 1 to 100.');
+  }
+  return getAnalysisJson<FrameComparisonPage>(`${analysisUrl(sessionId)}/frames?offset=${offset}&limit=${limit}`);
+}
+
+/** Explicit opt-in to the large debugging download; the results screen does not fetch it. */
+export function analysisDiagnosticsUrl(sessionId: string, download = true): string {
+  return `${analysisUrl(sessionId)}/diagnostics?download=${download}`;
+}
+
+async function getAnalysisJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { headers: { Accept: 'application/json' } });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(typeof data.detail === 'string' ? data.detail : data.error?.message ?? `Request failed (${response.status}).`);
+  }
+  return data as T;
 }

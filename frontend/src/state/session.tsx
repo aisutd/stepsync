@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 
 import type { AnalysisResult, PickedVideo } from '@/api/types';
 
@@ -6,6 +6,7 @@ type Session = {
   reference: PickedVideo | null;
   practice: PickedVideo | null;
   result: AnalysisResult | null;
+  beginResultRequest: () => { isCurrent: () => boolean; commit: (result: AnalysisResult) => boolean };
   stepRecordings: Record<number, PickedVideo>;
   setStepRecording: (step: number, video: PickedVideo) => void;
   setReference: (video: PickedVideo | null) => void;
@@ -22,12 +23,38 @@ type Session = {
 const SessionContext = createContext<Session | null>(null);
 
 export function SessionProvider({ children }: { children: ReactNode }) {
-  const [reference, setReference] = useState<PickedVideo | null>(null);
-  const [practice, setPractice] = useState<PickedVideo | null>(null);
-  const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [reference, updateReference] = useState<PickedVideo | null>(null);
+  const [practice, updatePractice] = useState<PickedVideo | null>(null);
+  const [result, updateResult] = useState<AnalysisResult | null>(null);
   const [stepRecordings, setStepRecordings] = useState<Record<number, PickedVideo>>({});
   const [currentStep, setCurrentStep] = useState<number | null>(null);
   const [completedSteps, setCompletedSteps] = useState<number[]>([]);
+
+  const generation = useRef(0);
+  // Invalidate synchronously, including before React renders the new selection.
+  const setReference = useCallback((video: PickedVideo | null) => {
+    generation.current++;
+    updateReference(video);
+    updateResult(null);
+  }, []);
+  const setPractice = useCallback((video: PickedVideo | null) => {
+    generation.current++;
+    updatePractice(video);
+    updateResult(null);
+  }, []);
+  const setResult = useCallback((next: AnalysisResult | null) => {
+    generation.current++;
+    updateResult(next);
+  }, []);
+  const beginResultRequest = useCallback(() => {
+    const requestedGeneration = ++generation.current;
+    const isCurrent = () => generation.current === requestedGeneration;
+    return { isCurrent, commit: (next: AnalysisResult) => {
+      if (!isCurrent()) return false;
+      setResult(next);
+      return true;
+    } };
+  }, [setResult]);
 
   // A new reference starts its step practice from the first step.
   const referenceKey = reference ? `${reference.fileName}:${reference.youtube?.steps?.length ?? 0}` : null;
@@ -61,6 +88,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   return (
     <SessionContext.Provider
       value={{
+        beginResultRequest,
         reference,
         practice,
         result,

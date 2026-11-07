@@ -3,16 +3,17 @@
 import logging
 import shutil
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Callable
+from typing import Callable, Literal
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, Path as PathParam, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 from .config import Settings
 from .handoff import ProcessingState
@@ -20,13 +21,21 @@ from .pose_processing import PoseArtifacts, run_pose_extraction
 from .video import VideoError, validate_video
 from .youtube import download_video, validate_url
 from .storage import save_video
-from .dtw_compare import compare_csv
+from .analysis import analyze_videos
+from .recompare import RecompareRequest, recompare_session
+from .analysis_models import AnalysisSummary, FramePage
+from .comparison import ComparisonConfig
+from .coaching import CoachingRequest, coach, conversation
+from .session_store import (SESSION_PATTERN, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
+                            load_session, get_frame_page, diagnostics_path)
+
 from .segmentation import segment_steps, steps_from_ranges
 from .supabase_store import StepInUseError, StepsChangedError, SupabaseError, SupabaseStore, step_from_row, add_motion_features, load_pose_frames
 
 logger = logging.getLogger(__name__)
 
 # Videos uploaded from the phone app by POST /analyze.
+BACKEND_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
 UPLOAD_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm"}
 MAX_UPLOAD_BYTES = 300 * 1024 * 1024  # 300 MB per video
@@ -101,7 +110,10 @@ def create_app(
     settings: Settings | None = None,
     pose_runner: Callable[[Path, Path, Path, float], PoseArtifacts] | None = None,
     supabase_store: "SupabaseStore | None | object" = _FROM_ENV,
+    comparison_config: ComparisonConfig | None = None,
+    coaching_generator: Callable | None = None,
 ) -> FastAPI:
+    load_dotenv(BACKEND_ENV_PATH, override=False, encoding="utf-8-sig")
     settings = settings or Settings.from_env()
     pose_runner = pose_runner or run_pose_extraction
     store = SupabaseStore.from_env() if supabase_store is _FROM_ENV else supabase_store
@@ -126,8 +138,19 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def request_error_handler(request, error):
-        message = ("Send a JSON object with a nonempty string in the 'url' field."
-                   if request.url.path == "/reference-videos" else "The request body doesn't have the expected fields.")
+        if request.url.path == "/analyze":
+            message = ("Send multipart video files named practice and reference, or a saved reference_video; "
+                       "mirror_mode must be auto, same, or mirrored.")
+        elif request.url.path == "/reference-videos":
+            message = "Send a JSON object with a nonempty string in the 'url' field."
+        elif request.url.path.endswith("/recompare"):
+            message = "Use a valid session ID and JSON with mirrorMode set to same or mirrored."
+        elif request.url.path.endswith("/coaching"):
+            message = "Use a valid session ID and a coaching message (1-1000 characters) with a distinct requestId."
+        elif request.url.path.startswith("/analyses/"):
+            message = "Invalid session ID or pagination parameters. Use a 32-character lowercase hex ID, offset >= 0, and limit from 1 to 100."
+        else:
+            message = "The request body doesn't have the expected fields."
         return JSONResponse(status_code=422, content={"error": {"code": "invalid_request", "message": message}})
 
     @app.post("/reference-videos", response_model=UploadResponse, status_code=200)
@@ -293,19 +316,16 @@ def create_app(
             raise HTTPException(502, str(error))
         return {"steps": [{k: step[k] for k in StepResponse.model_fields} for step in steps]}
 
-    @app.post("/analyze")
+    @app.post("/analyze", response_model=AnalysisSummary)
     def analyze(
         practice: UploadFile = File(...),
         reference: UploadFile | None = File(None),
         reference_video: str | None = Form(None),
         step_start_ms: int | None = Form(None),
         step_end_ms: int | None = Form(None),
+        mirror_mode: Literal["auto", "same", "mirrored"] | None = Form(None),
     ) -> dict:
-        """Scores the practice video against the reference with Satwik's DTW comparison (dtw_compare.py).
-
-        The reference is either an uploaded file or the `filename` POST /reference-videos returned for a
-        YouTube link (its saved pose data is reused). step_start_ms/step_end_ms limit the reference to one
-        tutorial step, so a recording of just that step gets a fair score."""
+        """Compare uploads or a saved dance, optionally restricted to a tutorial step."""
         boundaries = step_boundaries(step_start_ms, step_end_ms)
         if (reference is None) == (reference_video is None):
             raise HTTPException(
@@ -325,22 +345,75 @@ def create_app(
         except HTTPException:
             shutil.rmtree(session_dir, ignore_errors=True)
             raise
-        model, timeout = settings.pose_model_path, settings.pose_processing_timeout_seconds
-        if saved_reference is not None:
-            # Pose data from the YouTube import; only extracted again if it's missing.
-            reference_dir = settings.pose_results_directory / saved_reference.stem
-            reference_csv = reference_dir / "pose_data.csv"
-            if not reference_csv.is_file():
-                reference_csv = pose_runner(saved_reference, reference_dir, model, timeout).data_path
-        else:
-            reference_csv = pose_runner(reference_path, session_dir / "reference_pose", model, timeout).data_path
-        practice_csv = pose_runner(practice_path, session_dir / "practice_pose", model, timeout).data_path
         try:
-            result = compare_csv(reference_csv, practice_csv, **boundaries)
+            config = replace(comparison_config or ComparisonConfig(), mirror_mode=mirror_mode) if mirror_mode else comparison_config
+            cached = settings.pose_results_directory / saved_reference.stem / "pose_data.csv" if saved_reference else None
+            return analyze_videos(session_id, reference_path, practice_path, session_dir,
+                                  settings, pose_runner, config, reference_csv=cached, **boundaries)
+        except VideoError as error:
+            raise HTTPException(error.status_code, error.message) from error
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
-        # The response shape must match AnalysisResult in frontend/src/api/types.ts.
-        return {"sessionId": session_id, **result}
+        except Exception as error:
+            logger.exception("Comparison failed for session %s", session_id)
+            raise HTTPException(500, "Video comparison failed. Check the backend logs.") from error
+
+    @app.post("/analyses/{session_id}/recompare", response_model=AnalysisSummary)
+    def recompare(request: RecompareRequest, session_id: str = PathParam(..., pattern=SESSION_PATTERN)):
+        source, _ = load_session(UPLOAD_DIR, session_id, settings.analysis_retention_seconds, persist_views=False)
+        new_id = uuid.uuid4().hex
+        return recompare_session(source, UPLOAD_DIR / new_id, new_id, request.mirrorMode,
+                                 settings.analysis_retention_seconds, comparison_config)
+
+    @app.get("/analyses/{session_id}", response_model=AnalysisSummary, summary="Retrieve a saved analysis summary",
+             responses={404: {"description": "Unknown or unavailable session"}, 410: {"description": "Expired session"}})
+    def analysis_summary(session_id: str = PathParam(..., pattern=SESSION_PATTERN)):
+        _, summary = load_session(UPLOAD_DIR, session_id, settings.analysis_retention_seconds)
+        return summary
+
+    @app.get("/analyses/{session_id}/frames", response_model=FramePage,
+             summary="Retrieve a bounded page of original practice-frame comparisons",
+             responses={404: {"description": "Unknown or unavailable session"}, 410: {"description": "Expired session"},
+                        416: {"description": "Offset exceeds total frame records"}})
+    def analysis_frames(session_id: str = PathParam(..., pattern=SESSION_PATTERN),
+                        offset: int = Query(0, ge=0, description="Zero-based record offset, not a video frame index."),
+                        limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)):
+        """Includes assessed and unassessed records, with original timestamps, joint measurements and reasons.
+
+        offset == total returns an empty page; offset > total returns 416.
+        Expired sessions return 410; unknown/unavailable sessions return 404.
+        """
+        directory, summary = load_session(UPLOAD_DIR, session_id, settings.analysis_retention_seconds)
+        return get_frame_page(directory, summary, offset, limit)
+
+    @app.get("/analyses/{session_id}/diagnostics", response_class=FileResponse,
+             summary="Explicitly retrieve or download the complete persisted analysis",
+             responses={200: {"content": {"application/json": {}},
+                              "description": "Full JSON including all frame comparisons, alignment evidence and diagnostics."},
+                        404: {"description": "Unknown or unavailable session"}, 410: {"description": "Expired session"}})
+    def analysis_diagnostics(session_id: str = PathParam(..., pattern=SESSION_PATTERN),
+                             download: bool = Query(False, description="Download as an attachment instead of displaying JSON.")):
+        """Streams the stored comparison.json without extracting poses or recomputing comparison."""
+        directory, _ = load_session(UPLOAD_DIR, session_id, settings.analysis_retention_seconds)
+        return FileResponse(diagnostics_path(directory), media_type="application/json",
+                            filename=f"analysis-{session_id}.json" if download else None)
+
+    @app.get("/analyses/{session_id}/coaching", summary="Retrieve saved coaching conversation and availability")
+    def coaching_history(session_id: str = PathParam(..., pattern=SESSION_PATTERN)):
+        import os
+        directory, summary = load_session(UPLOAD_DIR, session_id, settings.analysis_retention_seconds)
+        return conversation(directory, summary, coaching_generator is not None or bool(os.getenv("GEMINI_API_KEY")))
+
+    @app.post("/analyses/{session_id}/coaching", summary="Generate initial Gemini coaching or ask a follow-up")
+    def coaching_message(request: CoachingRequest, session_id: str = PathParam(..., pattern=SESSION_PATTERN)):
+        """An empty object requests the cached initial summary. Follow-ups need message and requestId.
+
+        Uses saved evidence only. Does not re-extract videos or alter numerical results.
+        Missing/expired sessions use the same 404/410 responses as analysis retrieval.
+        Provider failures do not remove or invalidate the comparison.
+        """
+        directory, summary = load_session(UPLOAD_DIR, session_id, settings.analysis_retention_seconds)
+        return coach(directory, summary, request, coaching_generator)
 
     return app
 
@@ -422,7 +495,7 @@ MIN_SCORED_STEP_MS = 500
 
 
 def step_boundaries(start_ms: int | None, end_ms: int | None) -> dict:
-    """Reference time range (seconds) for compare_csv; empty when the whole dance is scored."""
+    """Reference time range (seconds) for the scoring input adapter; empty when the whole dance is scored."""
     if start_ms is None and end_ms is None:
         return {}
     if start_ms is None or end_ms is None or start_ms < 0 or end_ms <= start_ms:

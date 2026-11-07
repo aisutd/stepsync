@@ -48,3 +48,11 @@ def no_real_supabase(monkeypatch):
     """Tests must never write to the team's real Supabase project."""
     monkeypatch.delenv("STEPSYNC_SUPABASE_URL", raising=False)
     monkeypatch.delenv("STEPSYNC_SUPABASE_SECRET_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def isolated_local_environment(tmp_path, monkeypatch):
+    # App factories must never reload a developer's real credentials in tests.
+    monkeypatch.setattr("app.main.BACKEND_ENV_PATH", tmp_path / "missing.env")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)

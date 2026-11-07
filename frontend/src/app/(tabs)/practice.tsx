@@ -12,7 +12,7 @@ import { colors } from '@/theme';
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { reference, practice, setReference, setPractice, setResult, currentStep, setCurrentStep, completedSteps } =
+  const { reference, practice, setReference, setPractice, beginResultRequest, currentStep, setCurrentStep, completedSteps } =
     useSession();
   const tutorialSteps = reference?.youtube?.steps ?? [];
   const step = currentStep !== null ? tutorialSteps[currentStep] : undefined;
@@ -27,11 +27,10 @@ export default function HomeScreen() {
     setLoading(true);
     setError(null);
     setProgress(null);
+    const request = beginResultRequest();
     try {
-      setResult(
-        await analyze(reference, practice, setProgress, step ? { start_ms: step.start_ms, end_ms: step.end_ms } : undefined),
-      );
-      router.push('/results');
+      const result = await analyze(reference, practice, setProgress, step ? { start_ms: step.start_ms, end_ms: step.end_ms } : undefined);
+      if (request.commit(result)) router.push('/results');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Something went wrong.');
     } finally {
