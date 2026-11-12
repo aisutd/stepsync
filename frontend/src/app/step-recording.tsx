@@ -2,7 +2,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { Image, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { getDance, practiceStep, savedVideoUrl } from '@/api/client';
@@ -139,21 +139,17 @@ export default function StepRecordingScreen() {
           <Text style={styles.warning}>
             This step is locked. Master step {dance!.progress.current_step + 1} first (score over 80).
           </Text>
-        ) : result ? (
-          <ResultCard
-            result={result}
-            isLast={isLast}
-            onNext={returnToStep}
-            onAgain={recordAgain}
-          />
         ) : (
+          <>
+          {result && <ResultCard result={result} isLast={isLast} onNext={returnToStep} onAgain={recordAgain} />}
+          {!result && (
           <View testID="user-recording-panel" style={styles.section}>
             <Text accessibilityRole="header" style={styles.panelLabel}>Your recording</Text>
             {!cameraActive && (video ? (
               <View style={styles.saved}>
                 <VideoPreview key={video.uri} uri={video.uri} height={previewHeight} />
                 <Text style={styles.description}>
-                  {danceId ? 'Happy with this take? Score it to see if you mastered the step.' : 'Your recording is ready to review. Scoring is coming soon.'}
+                  {danceId ? 'Your dance was captured. Evaluate it against the step to see precise feedback.' : 'Your recording is ready to review. Scoring is available for imported dances.'}
                 </Text>
               </View>
             ) : (
@@ -168,7 +164,7 @@ export default function StepRecordingScreen() {
 
             {danceId && video && !cameraActive && (
               <PrimaryButton
-                label={scoring ? (uploaded < 1 ? `Uploading ${Math.round(uploaded * 100)}%` : 'Scoring…') : 'Score my step'}
+                label={scoring ? (uploaded < 1 ? `Uploading ${Math.round(uploaded * 100)}%` : 'Analyzing poses with DTW…') : 'Evaluate my test'}
                 onPress={score}
                 loading={scoring}
                 arrow={false}
@@ -188,6 +184,8 @@ export default function StepRecordingScreen() {
               />
             )}
           </View>
+          )}
+          </>
         )}
 
         {!result && <PrimaryButton label="Back to step" onPress={returnToStep} arrow={false} style={styles.button} />}
@@ -240,6 +238,27 @@ function ResultCard({
           ))}
         </View>
       )}
+      {result.visualIssues?.length ? (
+        <View style={styles.weak}>
+          <Text style={styles.panelLabel}>See exactly where your pose differs</Text>
+          <Text style={styles.description}>Red keypoints mark the largest differences. Green lines show the detected skeleton. Frames are aligned to the same dance movement by DTW.</Text>
+          {result.visualIssues.map(issue => (
+            <View key={issue.id} style={styles.visualCard}>
+              <Text style={styles.visualLabel}>Practice {formatClock(issue.practiceTime*1000)} · Tutorial {formatClock(issue.referenceTime*1000)}</Text>
+              <View style={styles.visualRow}>
+                <View style={styles.visualCol}>
+                  <Text style={styles.visualLabel}>Tutorial</Text>
+                  <Image source={{uri:issue.referenceImage}} style={styles.visualImage} resizeMode="contain" />
+                </View>
+                <View style={styles.visualCol}>
+                  <Text style={styles.visualLabel}>You</Text>
+                  <Image source={{uri:issue.practiceImage}} style={styles.visualImage} resizeMode="contain" />
+                </View>
+              </View>
+            </View>
+          ))}
+        </View>
+      ) : null}
       {unlocked ? (
         <PrimaryButton label={isLast ? 'Back to steps' : `Go to step ${result.stepIndex + 2}`} onPress={onNext} />
       ) : (
@@ -303,5 +322,10 @@ const styles = StyleSheet.create({
   weakText: { color: palette.text, fontSize: 13, lineHeight: 18 },
   linkWrap: { alignSelf: 'center' },
   link: { color: palette.accent, fontSize: 13, fontWeight: '600' },
+  visualCard: { gap: 9, paddingVertical: 9 },
+  visualLabel: { fontSize: 12, fontWeight: '600', color: palette.text },
+  visualRow: { flexDirection: 'row', gap: 8 },
+  visualCol: { flex: 1, gap: 4 },
+  visualImage: { width: '100%', height: 180, borderRadius: 10, backgroundColor: '#111' },
   pressed: { opacity: 0.75 },
 });

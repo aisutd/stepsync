@@ -17,10 +17,11 @@ from pydantic import BaseModel
 from .config import Settings
 from .handoff import ProcessingState
 from .pose_processing import PoseArtifacts, run_pose_extraction
-from .video import VideoError, validate_video
+from .video import VideoError, validate_video, normalize_for_analysis
 from .youtube import download_video, validate_url
 from .storage import save_video
 from .dtw_compare import compare_csv
+from .pose_feedback import annotated_issue_frames
 from .progress import MAX_TITLE_LENGTH, can_practice, clean_title, dance_progress, passed, title_key
 from .segmentation import segment_steps, steps_from_ranges
 from .supabase_store import StepInUseError, StepsChangedError, SupabaseError, SupabaseStore, step_from_row, add_motion_features, load_pose_frames
@@ -325,12 +326,17 @@ def create_app(
         reference_csv = reference_dir / "pose_data.csv"
         if not reference_csv.is_file():
             reference_csv = pose_runner(video, reference_dir, model, timeout).data_path
+        practice_path = normalize_for_analysis(practice_path, settings)
         practice_csv = pose_runner(practice_path, session_dir / "practice_pose", model, timeout).data_path
         try:
             result = compare_csv(reference_csv, practice_csv, **boundaries)
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
 
+        result["visualIssues"] = annotated_issue_frames(
+            reference_video=video, practice_video=practice_path,
+            reference_csv=reference_csv, practice_csv=practice_csv, issues=result["steps"],
+        )
         score = int(result["overallScore"])
         response = {"sessionId": session_id, **result, "stepId": step_id, "stepIndex": index, "passed": passed(score)}
         try:
@@ -435,7 +441,9 @@ def create_app(
             if not reference_csv.is_file():
                 reference_csv = pose_runner(saved_reference, reference_dir, model, timeout).data_path
         else:
+            reference_path = normalize_for_analysis(reference_path, settings)
             reference_csv = pose_runner(reference_path, session_dir / "reference_pose", model, timeout).data_path
+        practice_path = normalize_for_analysis(practice_path, settings)
         practice_csv = pose_runner(practice_path, session_dir / "practice_pose", model, timeout).data_path
         try:
             result = compare_csv(reference_csv, practice_csv, **boundaries)

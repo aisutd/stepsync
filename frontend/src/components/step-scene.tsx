@@ -53,8 +53,7 @@ type Props = {
   /** The demo area: a photo or a looping step clip. */
   media: ReactNode;
   badge: string;
-  /** The sound button on the demo; left out when there's nothing to hear (a still image). */
-  audio?: { muted: boolean; onToggle: () => void };
+  showAudio?: boolean;
   travel?: { text: string; icon?: 'travel' | 'check' | 'lock' | 'target' };
   sectionTitle: string;
   sectionMeta: string;
@@ -137,19 +136,7 @@ export function StepScene(props: Props) {
               <Rect width="100%" height="100%" fill="url(#demoShade)" />
             </Svg>
             <View style={styles.demoBadge} pointerEvents="none"><View style={styles.dot} /><Text style={styles.demoLabel}>{props.badge}</Text></View>
-            {props.audio && (
-              <Pressable
-                onPress={props.audio.onToggle}
-                hitSlop={8}
-                accessibilityRole="button"
-                accessibilityLabel={props.audio.muted ? 'Turn sound on' : 'Mute sound'}
-                style={({ pressed }) => [styles.audio, pressed && styles.pressed]}
-              >
-                {props.audio.muted
-                  ? <Ionicons name="volume-mute" size={17} color={palette.text} />
-                  : <DesignIcon name="volume" size={15} />}
-              </Pressable>
-            )}
+            {props.showAudio !== false && <View style={styles.audio} pointerEvents="none"><DesignIcon name="volume" size={15} /></View>}
             {props.travel && (
               <View style={styles.travel} pointerEvents="none">
                 {!props.travel.icon || props.travel.icon === 'travel'

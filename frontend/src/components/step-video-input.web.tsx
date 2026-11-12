@@ -6,12 +6,15 @@ import { PrimaryButton } from '@/components/primary-button';
 import { lessonColors as palette, radius } from '@/theme';
 import type { StepVideoInputProps } from './step-video-input.types';
 
-type Phase = 'idle' | 'requesting' | 'ready' | 'recording' | 'saving';
+type Phase = 'idle' | 'requesting' | 'ready' | 'countdown' | 'recording' | 'saving';
 const MAX_SECONDS = 180;
 
-export function StepVideoInput({ step, hasVideo, onRecorded, onActiveChange, previewHeight = 332 }: StepVideoInputProps) {
+export function StepVideoInput({ step, hasVideo, clip, onRecorded, onActiveChange, previewHeight = 332 }: StepVideoInputProps) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [elapsed, setElapsed] = useState(0);
+  const [count, setCount] = useState(3);
+  const countdownId = useRef(0);
+  const recordingLength = clip && clip.endMs > clip.startMs ? Math.min(180, Math.max(2, (clip.endMs-clip.startMs)/1000)) : 15;
   const [error, setError] = useState<string | null>(null);
   const [silent, setSilent] = useState(false);
   const preview = useRef<HTMLVideoElement>(null);
@@ -30,6 +33,7 @@ export function StepVideoInput({ step, hasVideo, onRecorded, onActiveChange, pre
 
   const discard = useCallback(() => {
     generation.current++;
+    countdownId.current++;
     const active = recorder.current;
     recorder.current = null;
     if (active && active.state !== 'inactive') active.stop();
@@ -43,7 +47,7 @@ export function StepVideoInput({ step, hasVideo, onRecorded, onActiveChange, pre
   }, [discard]));
 
   useEffect(() => {
-    if (phase === 'ready' && preview.current && stream.current) preview.current.srcObject = stream.current;
+    if ((phase === 'ready' || phase === 'countdown' || phase === 'recording') && preview.current && stream.current) preview.current.srcObject = stream.current;
   }, [phase]);
 
   useEffect(() => {
@@ -51,13 +55,15 @@ export function StepVideoInput({ step, hasVideo, onRecorded, onActiveChange, pre
     const timer = setInterval(() => {
       const seconds = (Date.now() - startedAt.current) / 1000;
       setElapsed(seconds);
-      if (seconds >= MAX_SECONDS && recorder.current?.state === 'recording') {
+      if (seconds >= Math.min(MAX_SECONDS, recordingLength) && recorder.current?.state === 'recording') {
         setPhase('saving');
         recorder.current.stop();
       }
     }, 250);
     return () => clearInterval(timer);
   }, [phase]);
+
+  useEffect(() => { void enableCamera(); }, []);
 
   async function enableCamera() {
     setError(null);
@@ -95,12 +101,24 @@ export function StepVideoInput({ step, hasVideo, onRecorded, onActiveChange, pre
     }
   }
 
+  async function startCountdown() {
+    if (!stream.current) return;
+    const id = ++countdownId.current;
+    setPhase('countdown');
+    for (let n=3; n>=1; n--) {
+      setCount(n);
+      await new Promise(resolve=>setTimeout(resolve,1000));
+      if (id !== countdownId.current) return;
+    }
+    startRecording();
+  }
+
   function startRecording() {
     if (!stream.current) return;
     const id = generation.current;
     const chunks: Blob[] = [];
     try {
-      const mimeType = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'].find(type => MediaRecorder.isTypeSupported(type));
+      const mimeType = ['video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find(type => MediaRecorder.isTypeSupported(type));
       const capture = new MediaRecorder(stream.current, mimeType ? { mimeType } : undefined);
       recorder.current = capture;
       capture.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
@@ -147,15 +165,16 @@ export function StepVideoInput({ step, hasVideo, onRecorded, onActiveChange, pre
           <video ref={preview} autoPlay muted playsInline aria-label="Live camera preview" style={{ width: '100%', height: previewHeight, objectFit: 'contain', transform: 'scaleX(-1)', background: '#000' }} />
         </View>
       )}
-      {(phase === 'ready' || phase === 'recording') && <Text style={styles.hint}>{silent ? 'Recording without sound. ' : ''}Keep your whole body in frame. Maximum 3 minutes.</Text>}
+      {(phase === 'ready' || phase === 'recording') && <Text style={styles.hint}>{silent ? 'Recording without sound. ' : ''}Keep your whole body in frame. We'll automatically stop after {Math.round(recordingLength)} seconds.</Text>}
+      {phase === 'countdown' && <Text accessibilityLiveRegion="assertive" style={styles.countdown}>{count}</Text>}
       {phase === 'recording' && <Text accessibilityLiveRegion="polite" style={styles.timer}>Recording {Math.floor(elapsed / 60)}:{String(Math.floor(elapsed % 60)).padStart(2, '0')}</Text>}
       <PrimaryButton
-        label={phase === 'idle' ? (hasVideo ? 'Record again' : 'Record video') : phase === 'requesting' ? 'Opening camera…' : phase === 'ready' ? 'Start recording' : phase === 'saving' ? 'Saving video…' : 'Stop recording'}
+        label={phase === 'idle' ? (hasVideo ? 'Record again' : 'Record video') : phase === 'requesting' ? 'Opening camera…' : phase === 'ready' ? 'Test my step · 3 second countdown' : phase === 'countdown' ? `Get ready… ${count}` : phase === 'saving' ? 'Saving video…' : 'Stop test'}
         arrow={false}
-        disabled={phase === 'requesting' || phase === 'saving'}
+        disabled={phase === 'requesting' || phase === 'saving' || phase === 'countdown'}
         onPress={() => {
           if (phase === 'idle') void enableCamera();
-          else if (phase === 'ready') startRecording();
+          else if (phase === 'ready') void startCountdown();
           else if (phase === 'recording') { setPhase('saving'); recorder.current?.stop(); }
         }}
       />
@@ -169,6 +188,7 @@ const styles = StyleSheet.create({
   content: { gap: 12 },
   camera: { overflow: 'hidden', borderRadius: 24 },
   hint: { fontSize: 13, lineHeight: 19, color: palette.secondary, textAlign: 'center' },
+  countdown: { fontSize: 64, fontWeight: '800', textAlign: 'center', color: palette.accent },
   timer: { fontSize: 18, color: palette.accent, fontWeight: '600', textAlign: 'center' },
   cancel: { padding: 12, borderRadius: radius.pill },
   error: { fontSize: 14, lineHeight: 20, color: '#C0392B' },

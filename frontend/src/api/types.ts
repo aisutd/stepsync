@@ -72,6 +72,8 @@ export type DanceProgress = {
 
 /** POST /dances/{id}/steps/{step_id}/practice: a scored attempt at one step. */
 export type StepPracticeResult = AnalysisResult & {
+  /** DTW-aligned annotated snapshots of the lowest-scoring movements. */
+  visualIssues?: { id: string; practiceTime: number; referenceTime: number; joints: number[]; referenceImage: string; practiceImage: string }[];
   stepId: string;
   stepIndex: number;
   passed: boolean;

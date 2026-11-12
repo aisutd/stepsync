@@ -4,3 +4,13 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .local-tools/
+
+# Local secrets and generated files
+.env
+.env.*
+!.env.example
+node_modules/
+.venv/
+__pycache__/
+.expo/
+*.pyc

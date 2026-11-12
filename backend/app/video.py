@@ -1,6 +1,8 @@
 """OpenCV decoding and RGB frame preparation. No pose extraction is performed."""
 
 import math
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -140,3 +142,49 @@ def prepared_frames(path: Path, metadata: VideoMetadata, settings: Settings) -> 
             image = cv2.rotate(image, rotations[metadata.rotation_degrees])
         image = resize_frame(image, settings.max_frame_width, settings.max_frame_height)
         yield PreparedFrame(index, timestamp, cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+
+
+def normalize_for_analysis(path: Path, settings: Settings) -> Path:
+    """Convert browser WebM and unusual phone containers to a constant-FPS MP4.
+
+    OpenCV sometimes reports 0 frame count/FPS or missing timestamps on
+    MediaRecorder WebM recordings. Use FFmpeg to generate a decodable,
+    timestamped H.264 file before pose extraction. All outputs stay in the
+    request's temporary directory. Never change the user's original upload.
+    """
+    path = Path(path)
+    needs_conversion = path.suffix.lower() == ".webm"
+    if not needs_conversion:
+        try:
+            validate_video(path, settings)
+            return path
+        except VideoError as exc:
+            if exc.code not in {"invalid_metadata", "invalid_timestamps", "corrupt_video", "unsupported_orientation"}:
+                raise
+            needs_conversion = True
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise VideoError("ffmpeg_missing", "This recording needs FFmpeg to decode. Install it with: brew install ffmpeg", 422)
+    destination = path.with_name(f"{path.stem}_normalized.mp4")
+    fps = min(30, max(1, settings.target_fps))
+    # A hard process timeout and max-duration check limit resource use.
+    command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+               "-i", str(path), "-map", "0:v:0", "-an",
+               "-t", str(settings.max_duration_seconds + 1),
+               "-vf", f"fps={fps:g},scale=trunc(iw/2)*2:trunc(ih/2)*2",
+               "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+               "-movflags", "+faststart", str(destination)]
+    try:
+        result = subprocess.run(command, capture_output=True, timeout=120, check=False)
+    except subprocess.TimeoutExpired as exc:
+        destination.unlink(missing_ok=True)
+        raise VideoError("transcode_timeout", "Video conversion timed out. Try a shorter recording.") from exc
+    if result.returncode or not destination.is_file() or destination.stat().st_size == 0:
+        destination.unlink(missing_ok=True)
+        raise VideoError("transcode_failed", "Video format could not be decoded. Try recording in MP4 or use a different browser.")
+    try:
+        validate_video(destination, settings)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    return destination

@@ -1,6 +1,6 @@
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { getDance, savedVideoUrl } from '@/api/client';
 import type { DanceDetail } from '@/api/types';
@@ -22,8 +22,6 @@ export default function DanceStepsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
-  // Browsers only autoplay muted video, so the web starts muted; tap the speaker for sound.
-  const [muted, setMuted] = useState(Platform.OS === 'web');
   const lastCurrent = useRef<number | null>(null);
 
   // Reload whenever the screen comes back into view, so a step mastered in practice shows up.
@@ -134,12 +132,11 @@ export default function DanceStepsScreen() {
           thumbnail={danceThumbnail(dance)}
           startMs={step.start_ms}
           endMs={step.end_ms}
-          muted={muted}
           style={sceneMediaStyle}
         />
       }
       badge={`STEP ${selected + 1} · ${formatStepLength(step)}`}
-      audio={dance.video_available ? { muted, onToggle: () => setMuted((m) => !m) } : undefined}
+      showAudio={dance.video_available}
       travel={
         status === 'mastered'
           ? { text: best !== undefined ? `Mastered · best ${best}` : 'Mastered', icon: 'check' }
