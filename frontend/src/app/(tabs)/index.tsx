@@ -4,13 +4,12 @@ import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-nati
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { DanceImage } from '@/components/dance-image';
-import { ProgressRing } from '@/components/progress-ring';
-import { continueWatching, progress, routines } from '@/data/home';
+import { continueWatching, routines } from '@/data/home';
 import { formatClock } from '@/lib/dance';
 import { useDances } from '@/lib/use-dances';
 import { colors, radius } from '@/theme';
 
-// Kaitlyn's step lesson, still on sample data; kept on the home screen so it stays reachable.
+// Kaitlyn's sample step lesson, shown in the card below until the user has a dance of their own.
 const sampleLesson = routines.find((r) => r.id === 'perfect-night') ?? routines[0];
 
 export default function HomeScreen() {
@@ -18,8 +17,8 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { dances } = useDances();
   const latest = dances?.find((d) => d.mine) ?? dances?.[0] ?? null;
-  const fraction = progress.movesCompleted / progress.movesTotal;
-  const goPractice = () => router.push('/practice');
+  const goPractice = () =>
+    latest ? router.push({ pathname: '/dance/[id]', params: { id: latest.id } }) : router.navigate('/explore');
   const goUpload = () => router.push('/youtube?from=home');
   const openDance = (id: string) => router.push({ pathname: '/dance/[id]', params: { id } });
   const openLesson = () => router.push('/steps');
@@ -73,25 +72,6 @@ export default function HomeScreen() {
           <Text style={styles.uploadText}>Upload</Text>
         </Pressable>
       </View>
-
-      {/* Progress */}
-      <Pressable onPress={goPractice} style={({ pressed }) => [styles.card, styles.row, pressed && styles.pressed]}>
-        <ProgressRing fraction={fraction} />
-        <View style={styles.flex}>
-          <View style={styles.rowBetween}>
-            <Text style={styles.cardTitle}>Your Progress</Text>
-            <View style={styles.pill}>
-              <Text style={styles.pillText}>Level {progress.level}</Text>
-            </View>
-          </View>
-          <Text style={styles.count}>
-            {progress.movesCompleted}
-            <Text style={styles.countTotal}> / {progress.movesTotal}</Text>
-          </Text>
-          <Text style={styles.caption}>Moves Completed</Text>
-        </View>
-        <Ionicons name="chevron-forward" size={18} color={colors.muted} />
-      </Pressable>
 
       {/* Continue: the newest dance from Supabase, or the sample lesson until there is one */}
       {latest ? (
@@ -151,29 +131,6 @@ export default function HomeScreen() {
         </Pressable>
       )}
 
-      {/* Lessons; every dance is listed in the Explore tab */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.routines}>
-        <Pressable accessibilityRole="button" accessibilityLabel={`Learn ${sampleLesson.title}`} onPress={openLesson} style={styles.routine}>
-          <View style={[styles.routineImageWrap, !latest && styles.routineSelected]}>
-            <Image source={sampleLesson.image} style={styles.routineImage} resizeMode="cover" />
-          </View>
-          <Text style={styles.routineLabel} numberOfLines={1}>
-            {sampleLesson.title}
-          </Text>
-        </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="All dances" onPress={() => router.navigate('/explore')} style={styles.routine}>
-          <View style={[styles.routineImageWrap, styles.addTile]}>
-            <Ionicons name="albums-outline" size={28} color={colors.text} />
-          </View>
-          <Text style={styles.routineLabel}>All dances</Text>
-        </Pressable>
-        <Pressable onPress={goUpload} style={styles.routine}>
-          <View style={[styles.routineImageWrap, styles.addTile]}>
-            <Ionicons name="add" size={30} color={colors.text} />
-          </View>
-          <Text style={styles.routineLabel}>Add More</Text>
-        </Pressable>
-      </ScrollView>
     </ScrollView>
   );
 }
@@ -183,7 +140,6 @@ const styles = StyleSheet.create({
   content: { paddingHorizontal: 18, gap: 16 },
   flex: { flex: 1, gap: 4 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-  rowBetween: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   pressed: { opacity: 0.75 },
 
   topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
@@ -241,10 +197,6 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   cardTitle: { color: colors.text, fontSize: 16, fontWeight: '600' },
-  pill: { backgroundColor: colors.pill, paddingHorizontal: 10, paddingVertical: 3, borderRadius: radius.pill },
-  pillText: { color: colors.pillText, fontSize: 12, fontWeight: '600' },
-  count: { color: colors.text, fontSize: 20, fontWeight: '700', marginTop: 6 },
-  countTotal: { color: colors.muted, fontSize: 14, fontWeight: '500' },
   caption: { color: colors.muted, fontSize: 13 },
 
   thumb: {
@@ -277,18 +229,4 @@ const styles = StyleSheet.create({
   track: { height: 5, borderRadius: 3, backgroundColor: colors.hairline, marginTop: 10, overflow: 'hidden' },
   trackFill: { height: '100%', borderRadius: 3, backgroundColor: colors.accentSoft },
 
-  routines: { gap: 12, paddingVertical: 2 },
-  routine: { width: 84, alignItems: 'center', gap: 6 },
-  routineImageWrap: {
-    width: 84,
-    height: 76,
-    borderRadius: 12,
-    overflow: 'hidden',
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  routineSelected: { borderColor: colors.accentSoft },
-  routineImage: { width: '100%', height: '100%' },
-  routineLabel: { color: colors.text, fontSize: 12, fontWeight: '500' },
-  addTile: { backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center' },
 });

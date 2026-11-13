@@ -292,6 +292,40 @@ class SupabaseStore:
         rows = self._get("user_dance_progress", {"user_id": f"eq.{user_id}", "select": "dance_id,steps_completed"})
         return {row["dance_id"]: row.get("steps_completed") or 0 for row in rows.json()}
 
+    def delete_dance(self, dance_id: str, step_ids: list[str]) -> None:
+        """Delete a dance and everything that points at it, children first, so it works whether or not
+        the foreign keys cascade. Tables that don't exist in this project are skipped."""
+        steps = f"in.({','.join(step_ids)})" if step_ids else None
+        sessions = self._rows("practice_sessions", {"dance_id": f"eq.{dance_id}", "select": "id"})
+        session_ids = [row["id"] for row in sessions]
+        if session_ids:
+            self._delete("step_attempts", {"session_id": f"in.({','.join(session_ids)})"}, optional=True)
+        if steps:
+            self._delete("step_attempts", {"step_id": steps}, optional=True)  # attempts from other users' sessions
+        self._delete("user_dance_progress", {"dance_id": f"eq.{dance_id}"}, optional=True)
+        self._delete("practice_sessions", {"dance_id": f"eq.{dance_id}"}, optional=True)
+        self._delete("saved_dances", {"dance_id": f"eq.{dance_id}"}, optional=True)
+        self._delete("dance_jobs", {"dance_id": f"eq.{dance_id}"}, optional=True)
+        if steps:
+            self._delete("keyframes", {"step_id": steps})
+        self._delete("pose_frames", {"dance_id": f"eq.{dance_id}"}, optional=True)
+        self._delete("steps", {"dance_id": f"eq.{dance_id}"})
+        self._delete("dances", {"id": f"eq.{dance_id}"})
+
+    def video_in_use(self, video_path: str) -> bool:
+        """Whether any dance still points at this saved video file."""
+        return bool(self._get("dances", {"video_path": f"eq.{video_path}", "select": "id", "limit": "1"}).json())
+
+    def _delete(self, table: str, params: dict, optional: bool = False) -> None:
+        try:
+            response = self.client.delete(f"{self.config.url}/rest/v1/{table}", params=params, headers=self._headers())
+        except httpx.HTTPError as error:
+            logger.exception("Supabase request failed")
+            raise SupabaseError("Couldn't reach Supabase. Check STEPSYNC_SUPABASE_URL and the network.") from error
+        if optional and _missing_table(response):
+            return
+        self._check(response, table)
+
     def _send(self, method: str, table: str, json, prefer: str | None = None, params: dict | None = None) -> httpx.Response:
         headers = {**self._headers(), **({"Prefer": prefer} if prefer else {})}
         try:
@@ -302,6 +336,18 @@ class SupabaseStore:
             raise SupabaseError("Couldn't reach Supabase. Check STEPSYNC_SUPABASE_URL and the network.") from error
         self._check(response, table)
         return response
+
+    def _rows(self, table: str, params: dict) -> list[dict]:
+        """Rows of an optional table: empty when the table doesn't exist in this project."""
+        try:
+            response = self.client.get(f"{self.config.url}/rest/v1/{table}", params=params, headers=self._headers())
+        except httpx.HTTPError as error:
+            logger.exception("Supabase request failed")
+            raise SupabaseError("Couldn't reach Supabase. Check STEPSYNC_SUPABASE_URL and the network.") from error
+        if _missing_table(response):
+            return []
+        self._check(response, table)
+        return response.json()
 
     def _get(self, table: str, params: dict) -> httpx.Response:
         try:
@@ -446,6 +492,11 @@ class SupabaseStore:
         elif response.status_code in (401, 403):
             hint = " Check STEPSYNC_SUPABASE_SECRET_KEY (use the secret/service_role key)."
         raise SupabaseError(f"Supabase rejected the {table} request ({response.status_code}).{hint}{_reason(response)}")
+
+
+def _missing_table(response: httpx.Response) -> bool:
+    """PostgREST's answer for a table that isn't in this Supabase project."""
+    return response.status_code == 404 or "PGRST205" in response.text or "42P01" in response.text
 
 
 def _reason(response: httpx.Response) -> str:

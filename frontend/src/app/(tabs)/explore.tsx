@@ -4,21 +4,49 @@ import { useState } from 'react';
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { deleteDance } from '@/api/client';
 import type { DanceSummary } from '@/api/types';
 import { DanceImage } from '@/components/dance-image';
+import { ActionSheet, ConfirmDialog } from '@/components/dialogs';
 import { formatClock } from '@/lib/dance';
 import { useDances } from '@/lib/use-dances';
 import { colors, radius } from '@/theme';
 
-/** Every dance: your own and the ones teammates shared. Tap one to open its step scene. */
+/**
+ * Every dance: your own and the ones teammates shared. Tap one to open its step scene.
+ * Your own dances have a "⋯" menu with Delete, which asks for confirmation first.
+ */
 export default function ExploreScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { dances, error, loading, reload, available } = useDances();
   const [query, setQuery] = useState('');
+  const [menuFor, setMenuFor] = useState<DanceSummary | null>(null);
+  const [confirmFor, setConfirmFor] = useState<DanceSummary | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [removed, setRemoved] = useState<Set<string>>(new Set());
+
+  async function confirmDelete() {
+    if (!confirmFor || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteDance(confirmFor.id);
+      setRemoved((ids) => new Set(ids).add(confirmFor.id)); // hide it now; the reload confirms
+      setConfirmFor(null);
+      reload();
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : 'Could not delete this dance.');
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   const search = query.trim().toLowerCase();
-  const shown = (dances ?? []).filter((d) => !search || d.title.toLowerCase().includes(search));
+  const shown = (dances ?? []).filter(
+    (d) => !removed.has(d.id) && (!search || d.title.toLowerCase().includes(search)),
+  );
   const mine = shown.filter((d) => d.mine);
   const shared = shown.filter((d) => !d.mine);
   const open = (id: string) => router.push({ pathname: '/dance/[id]', params: { id } });
@@ -93,12 +121,47 @@ export default function ExploreScreen() {
             <Text style={styles.note}>No dances match "{query.trim()}".</Text>
           ) : (
             <>
-              <Section title="Your dances" dances={mine} onOpen={open} empty="You haven't uploaded a dance yet." />
+              <Section
+                title="Your dances"
+                dances={mine}
+                onOpen={open}
+                onMenu={setMenuFor}
+                empty="You haven't uploaded a dance yet."
+              />
               {shared.length > 0 && <Section title="Shared by others" dances={shared} onOpen={open} />}
             </>
           )}
         </>
       )}
+
+      <ActionSheet
+        visible={menuFor !== null}
+        title={menuFor?.title}
+        onClose={() => setMenuFor(null)}
+        actions={[
+          {
+            label: 'Delete dance',
+            icon: 'trash-outline',
+            destructive: true,
+            onPress: () => {
+              setDeleteError(null);
+              setConfirmFor(menuFor);
+              setMenuFor(null);
+            },
+          },
+        ]}
+      />
+      <ConfirmDialog
+        visible={confirmFor !== null}
+        title={`Delete "${confirmFor?.title ?? ''}"?`}
+        message="This removes the dance, its steps and all practice progress on it. This can't be undone."
+        confirmLabel="Delete"
+        destructive
+        busy={deleting}
+        error={deleteError}
+        onConfirm={confirmDelete}
+        onCancel={() => setConfirmFor(null)}
+      />
     </ScrollView>
   );
 }
@@ -107,11 +170,14 @@ function Section({
   title,
   dances,
   onOpen,
+  onMenu,
   empty,
 }: {
   title: string;
   dances: DanceSummary[];
   onOpen: (id: string) => void;
+  /** Shows the "⋯" button (your own dances only). */
+  onMenu?: (dance: DanceSummary) => void;
   empty?: string;
 }) {
   return (
@@ -123,7 +189,12 @@ function Section({
       {dances.length === 0 && empty ? <Text style={styles.note}>{empty}</Text> : null}
       <View style={styles.grid}>
         {dances.map((dance) => (
-          <DanceCard key={dance.id} dance={dance} onPress={() => onOpen(dance.id)} />
+          <DanceCard
+            key={dance.id}
+            dance={dance}
+            onPress={() => onOpen(dance.id)}
+            onMenu={onMenu ? () => onMenu(dance) : undefined}
+          />
         ))}
       </View>
     </View>
@@ -131,7 +202,7 @@ function Section({
 }
 
 /** A dance as a card: tall thumbnail (Shorts are vertical), title, and how many steps are mastered. */
-function DanceCard({ dance, onPress }: { dance: DanceSummary; onPress: () => void }) {
+function DanceCard({ dance, onPress, onMenu }: { dance: DanceSummary; onPress: () => void; onMenu?: () => void }) {
   const done = dance.steps_completed ?? 0;
   const total = dance.step_count;
   const finished = total > 0 && done >= total;
@@ -158,6 +229,17 @@ function DanceCard({ dance, onPress }: { dance: DanceSummary; onPress: () => voi
           </View>
         )}
         {dance.mine && dance.is_public && <Text style={styles.publicBadge}>PUBLIC</Text>}
+        {onMenu && (
+          <Pressable
+            onPress={onMenu}
+            hitSlop={10}
+            accessibilityRole="button"
+            accessibilityLabel={`More options for ${dance.title}`}
+            style={({ pressed }) => [styles.menuButton, pressed && styles.pressed]}
+          >
+            <Ionicons name="ellipsis-horizontal" size={18} color={colors.text} />
+          </Pressable>
+        )}
       </View>
       <View style={styles.cardBody}>
         <Text style={styles.cardTitle} numberOfLines={2}>
@@ -246,7 +328,7 @@ const styles = StyleSheet.create({
   durationText: { color: colors.onPrimary, fontSize: 11, fontWeight: '700' },
   doneBadge: {
     position: 'absolute',
-    top: 8,
+    bottom: 8,
     right: 8,
     width: 24,
     height: 24,
@@ -254,6 +336,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: colors.good,
+  },
+  menuButton: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,252,247,0.92)',
   },
   publicBadge: {
     position: 'absolute',

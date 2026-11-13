@@ -8,8 +8,7 @@ import { getDance, savedVideoUrl } from '@/api/client';
 import type { DanceDetail, DanceStep } from '@/api/types';
 import { PrimaryButton } from '@/components/primary-button';
 import { StepPlayer } from '@/components/step-player';
-import { danceThumbnail, danceToVideo, formatClock } from '@/lib/dance';
-import { useSession } from '@/state/session';
+import { danceThumbnail, formatClock } from '@/lib/dance';
 import { colors, radius } from '@/theme';
 
 /** A saved dance's video and steps, with the step editor for your own dances (from the step scene). */
@@ -17,7 +16,6 @@ export default function EditDanceScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { setReference } = useSession();
   const [dance, setDance] = useState<DanceDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,10 +34,11 @@ export default function EditDanceScreen() {
 
   const back = () => (router.canGoBack() ? router.back() : router.replace('/'));
 
+  // Practice happens step by step on the dance's step scene.
   function practice() {
     if (!dance) return;
-    setReference(danceToVideo(dance));
-    router.navigate('/practice');
+    if (router.canGoBack()) router.back();
+    else router.replace({ pathname: '/dance/[id]', params: { id: dance.id } });
   }
 
   const onStepsSaved = (steps: DanceStep[]) =>
@@ -92,7 +91,7 @@ export default function EditDanceScreen() {
             onStepsSaved={onStepsSaved}
           />
 
-          <PrimaryButton label="Practice this dance" onPress={practice} />
+          <PrimaryButton label="Back to steps" onPress={practice} />
         </>
       )}
     </ScrollView>

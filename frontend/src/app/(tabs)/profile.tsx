@@ -13,7 +13,8 @@ export default function ProfileScreen() {
   const email = session?.user.email;
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top + 48 }]}>
+    // Centered in the space above the floating tab bar (about 110 px tall with its margin).
+    <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom + 110 }]}>
       <View style={styles.avatar}>
         <Ionicons name="person-outline" size={40} color={colors.onPrimary} />
       </View>
@@ -35,7 +36,14 @@ export default function ProfileScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, alignItems: 'center', gap: 8, paddingHorizontal: 24, backgroundColor: colors.background },
+  container: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 24,
+    backgroundColor: colors.background,
+  },
   avatar: {
     width: 96,
     height: 96,
@@ -45,7 +53,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginBottom: 12,
   },
-  name: { color: colors.text, fontSize: 20, fontWeight: '700' },
+  name: { color: colors.text, fontSize: 20, fontWeight: '700', textAlign: 'center' },
   caption: { color: colors.muted, fontSize: 14, textAlign: 'center' },
-  button: { alignSelf: 'stretch', marginTop: 28 },
+  button: { width: '100%', maxWidth: 320, marginTop: 28 },
 });

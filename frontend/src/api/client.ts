@@ -100,6 +100,21 @@ export function getDance(danceId: string): Promise<DanceDetail> {
   return getJson<DanceDetail>(`/dances/${encodeURIComponent(danceId)}`);
 }
 
+/** Delete one of your dances and everything saved with it (DELETE /dances/{id}). */
+export async function deleteDance(danceId: string): Promise<void> {
+  if (!API_URL) throw new Error('Connect the backend (EXPO_PUBLIC_API_URL) to delete dances.');
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}/dances/${encodeURIComponent(danceId)}`, {
+      method: 'DELETE',
+      headers: await authHeader(),
+    });
+  } catch {
+    throw new Error(unreachable());
+  }
+  if (!response.ok) throw new Error(errorMessage(await response.text(), response.status));
+}
+
 async function getJson<T>(path: string): Promise<T> {
   if (!API_URL) throw new Error('Connect the backend (EXPO_PUBLIC_API_URL) to see your dances.');
   let response: Response;

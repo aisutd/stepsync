@@ -352,6 +352,44 @@ def create_app(
         response["progress"] = progress
         return response
 
+    @app.delete("/dances/{dance_id}", status_code=204)
+    def delete_dance(dance_id: str, authorization: str | None = Header(default=None)) -> None:
+        """Delete one of your dances: its steps, keyframes, pose data and everyone's practice on it,
+        plus the video and pose files on this backend once no other dance uses them."""
+        user_id = signed_in_user(authorization)
+        try:
+            found = store.get_dance_with_steps(dance_id)
+        except SupabaseError as error:
+            raise HTTPException(502, str(error))
+        if found is None:
+            raise HTTPException(404, "That dance doesn't exist.")
+        row, steps = found
+        if row.get("owner_id") != user_id:
+            if not row.get("is_public"):
+                raise HTTPException(404, "That dance doesn't exist.")
+            raise HTTPException(403, "You can only delete your own dances.")
+        try:
+            store.delete_dance(dance_id, [step["id"] for step in steps])
+        except SupabaseError as error:
+            raise HTTPException(502, str(error))
+        remove_saved_files(row.get("video_path"))
+
+    def remove_saved_files(video_path: str | None) -> None:
+        """Best effort: the dance is already gone from Supabase, so a file left behind only costs disk."""
+        if not video_path:
+            return
+        try:
+            if store.video_in_use(video_path):
+                return
+            video = find_saved_video(video_path, settings.video_directory)
+        except (HTTPException, SupabaseError):
+            return
+        shutil.rmtree(settings.pose_results_directory / video.stem, ignore_errors=True)
+        try:
+            video.unlink()
+        except OSError:
+            logger.exception("Could not delete %s", video)
+
     @app.put("/dances/{dance_id}/steps")
     def update_dance_steps(dance_id: str, body: StepsUpdate, authorization: str | None = Header(default=None)) -> dict:
         """Save steps edited in the app: cuts moved, steps split or merged. Steps that continue a saved

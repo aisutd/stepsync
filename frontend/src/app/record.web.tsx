@@ -154,7 +154,7 @@ export default function RecordScreen() {
 
   function close() {
     if (router.canGoBack()) router.back();
-    else router.replace('/practice');
+    else router.replace('/');
   }
 
   function onShutter() {
