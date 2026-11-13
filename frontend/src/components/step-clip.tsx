@@ -53,7 +53,9 @@ export function StepClip({ source, thumbnail, startMs, endMs, muted = false, sty
 
   useEffect(() => {
     player.muted = muted;
-  }, [player, muted]);
+    // Turning the sound on is a tap, which also lets a browser start a video it wouldn't autoplay.
+    if (!muted && source && focused && !player.playing) player.play();
+  }, [player, muted, source, focused]);
 
   useEffect(() => {
     if (!source || !focused) return;

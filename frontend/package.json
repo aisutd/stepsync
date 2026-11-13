@@ -5,6 +5,7 @@
   "main": "expo-router/entry",
   "scripts": {
     "start": "node scripts/update-api-ip.js && expo start",
+    "tunnel": "node scripts/update-api-ip.js && expo start --tunnel",
     "ios": "node scripts/update-api-ip.js && expo start --ios",
     "android": "node scripts/update-api-ip.js && expo start --android",
     "typecheck": "tsc --noEmit",

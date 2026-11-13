@@ -2,7 +2,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useEffect, useState } from 'react';
-import { Image, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { getDance, practiceStep, savedVideoUrl } from '@/api/client';
@@ -29,6 +29,8 @@ export default function StepRecordingScreen() {
   const danceId = params.danceId || null;
   const { stepRecordings, setStepRecording } = useSession();
   const [cameraActive, setCameraActive] = useState(false);
+  // Browsers only autoplay muted video, so the web starts muted; tap the speaker for sound.
+  const [clipMuted, setClipMuted] = useState(Platform.OS === 'web');
 
   // A saved dance: load its steps and the user's progress.
   const [dance, setDance] = useState<DanceDetail | null>(null);
@@ -96,14 +98,28 @@ export default function StepRecordingScreen() {
     detail = `${stepPace(s)} · ${stepFocus(s)} · ${formatClock(s.start_ms)} to ${formatClock(s.end_ms)} of the dance`;
     clipInfo = { source, startMs: s.start_ms, endMs: s.end_ms };
     clip = (
-      <StepClip
-        testID="step-clip"
-        source={source}
-        thumbnail={danceThumbnail(dance)}
-        startMs={s.start_ms}
-        endMs={s.end_ms}
-        style={[styles.reference, { height: previewHeight }]}
-      />
+      <View>
+        <StepClip
+          testID="step-clip"
+          source={source}
+          thumbnail={danceThumbnail(dance)}
+          startMs={s.start_ms}
+          endMs={s.end_ms}
+          muted={clipMuted}
+          style={[styles.reference, { height: previewHeight }]}
+        />
+        {source && (
+          <Pressable
+            onPress={() => setClipMuted((m) => !m)}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={clipMuted ? 'Turn sound on' : 'Mute sound'}
+            style={({ pressed }) => [styles.soundButton, pressed && styles.pressed]}
+          >
+            <Ionicons name={clipMuted ? 'volume-mute' : 'volume-high'} size={17} color={palette.text} />
+          </Pressable>
+        )}
+      </View>
     );
   } else {
     const count = grapevineCounts[step];
@@ -297,6 +313,7 @@ const styles = StyleSheet.create({
   section: { gap: 12 },
   panelLabel: { fontSize: 13, fontWeight: '600', color: palette.secondary },
   reference: { width: '100%', borderRadius: 24, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
+  soundButton: { position: 'absolute', top: 12, right: 12, width: 34, height: 34, borderRadius: radius.pill, backgroundColor: 'rgba(255,252,247,0.91)', alignItems: 'center', justifyContent: 'center' },
   placeholderLabel: { color: '#AAA', fontSize: 13 },
   preview: { borderRadius: 24, borderWidth: 1, borderStyle: 'dashed', borderColor: palette.border, backgroundColor: palette.surface, padding: 18, alignItems: 'center', justifyContent: 'center', gap: 12 },
   cameraIcon: { width: 56, height: 56, borderRadius: radius.pill, backgroundColor: palette.selected, alignItems: 'center', justifyContent: 'center' },
